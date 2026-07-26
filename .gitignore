@@ -1,0 +1,9 @@
+/.gradle/
+/.idea/
+/local.properties
+/**/build/
+*.iml
+
+# The pulled target APK is only an analysis input and must not be committed.
+/target-apk/
+/.codex-backups/
