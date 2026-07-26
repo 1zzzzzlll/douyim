@@ -174,15 +174,11 @@ final class ImmersiveUi {
         int pauseIntentInitialState = touchDownEngineState;
         touchDownEngine = null;
         if (resumeRequested) {
-            MAIN.postDelayed(() -> {
-                if (gestureToken != touchGestureToken
-                        || !PlaybackState.isUserPaused()) {
-                    return;
-                }
-                PlaybackState.userPlaying();
-                removeDownloadButton();
-                scheduleScan(0L);
-            }, 220L);
+            confirmUserResume(
+                    gestureToken,
+                    pauseIntentEngine,
+                    4
+            );
         } else {
             confirmUserPause(
                     gestureToken,
@@ -194,6 +190,35 @@ final class ImmersiveUi {
                     4
             );
         }
+    }
+
+    private static void confirmUserResume(
+            long gestureToken,
+            Object resumeIntentEngine,
+            int attemptsLeft
+    ) {
+        MAIN.postDelayed(() -> {
+            if (gestureToken != touchGestureToken
+                    || !PlaybackState.isUserPaused()) {
+                return;
+            }
+            if (PlaybackState.confirmUserPlaying(resumeIntentEngine)) {
+                removeDownloadButton();
+                scheduleScan(0L);
+                return;
+            }
+            if (attemptsLeft > 1) {
+                confirmUserResume(
+                        gestureToken,
+                        resumeIntentEngine,
+                        attemptsLeft - 1
+                );
+            } else {
+                Log.d(DouyinModule.TAG,
+                        "ignored center tap because playback stayed paused");
+                scheduleScan(0L);
+            }
+        }, 120L);
     }
 
     private static void confirmUserPause(

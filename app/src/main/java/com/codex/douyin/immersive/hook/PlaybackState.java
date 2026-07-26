@@ -405,6 +405,33 @@ final class PlaybackState {
         return engine.get();
     }
 
+    static synchronized boolean confirmUserPlaying(Object expectedEngine) {
+        if (!userPaused
+                || !isConfirmedUserResume(
+                expectedEngine,
+                userPausedEngine.get(),
+                engine.get(),
+                playbackState(expectedEngine)
+        )) {
+            return false;
+        }
+        markPlaying(expectedEngine, false, true);
+        Log.i(DouyinModule.TAG, "playback=user-resumed");
+        return true;
+    }
+
+    static boolean isConfirmedUserResume(
+            Object expectedEngine,
+            Object pausedEngine,
+            Object currentEngine,
+            int currentState
+    ) {
+        return expectedEngine != null
+                && expectedEngine == pausedEngine
+                && expectedEngine == currentEngine
+                && currentState == 1;
+    }
+
     static synchronized void userPlaying() {
         userPaused = false;
         userPausedAt = 0L;
