@@ -24,7 +24,7 @@ public final class MainActivity extends Activity {
         root.setPadding(dp(PAD), dp(48), dp(PAD), dp(PAD));
         root.setBackgroundColor(Color.rgb(16, 17, 20));
 
-        TextView title = text("抖音纯净播放", 26, Color.WHITE);
+        TextView title = text("抖仙人", 26, Color.WHITE);
         title.setGravity(Gravity.CENTER);
         root.addView(title, matchWrap());
 

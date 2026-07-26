@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">抖音纯净播放</string>
-    <string name="module_description">纯净播放，并支持暂停时下载当前无水印视频。</string>
+    <string name="app_name">抖仙人</string>
+    <string name="module_description">抖音纯净播放、内容过滤与无水印视频下载。</string>
 </resources>

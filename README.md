@@ -1,6 +1,8 @@
-# 抖音纯净播放
+# 抖仙人
 
-面向抖音 Android 客户端的 LSPosed Modern API 102 模块。播放视频时只保留视频画面，
+<img src="docs/douxianren-icon.png" alt="抖仙人图标" width="160">
+
+面向抖音 Android 客户端的 LSPosed Modern API 102 纯净播放模块。播放视频时只保留视频画面，
 暂停后恢复完整界面，并支持直接下载当前无水印视频。
 
 ## 主要功能
@@ -20,7 +22,7 @@
 | 已验证抖音版本 | 39.7.0（versionCode 390701） |
 | Android | 9（API 28）及以上 |
 | 默认作用域 | `com.ss.android.ugc.aweme` |
-| 模块版本 | 1.2.0 |
+| 模块版本 | 1.3.0 |
 
 模块针对抖音 39.7.0 的运行时结构进行适配。抖音升级后，播放器类、数据模型或界面层级可能变化，
 届时需要重新适配。
@@ -28,15 +30,15 @@
 ## 安装
 
 1. 从 [`dist`](dist) 目录下载最新版
-   [`douyin-immersive-lsp-api102-v1.2.0.apk`](dist/douyin-immersive-lsp-api102-v1.2.0.apk)。
+   [`douxianren-lsp-api102-v1.3.0.apk`](dist/douxianren-lsp-api102-v1.3.0.apk)。
 2. 在手机上安装 APK。
-3. 在 LSPosed 中启用“抖音纯净播放”模块。
+3. 在 LSPosed 中启用“抖仙人”模块。
 4. 保持默认作用域“抖音”，然后强制停止并重新打开抖音。
 
 最新版 APK 的 SHA-256：
 
 ```text
-0C4896E54BEAE64454942F9896164DA3E6210FCCBB2EB0E5B81FD51C7742F5CD
+91A4CB8C7851A755A21B9C6E37BAAD44533492879AB10085EC0465DCF1D35BF4
 ```
 
 ## 使用方式
