@@ -267,7 +267,7 @@ final class PlaybackState {
         return true;
     }
 
-    static synchronized boolean consumeNearCompletion() {
+    static synchronized boolean consumeLoopBoundary() {
         if (userPaused) {
             return false;
         }
@@ -296,27 +296,22 @@ final class PlaybackState {
             }
 
             boolean loopBoundary =
-                    lastPosition >= Math.max(3_000L, duration * 3L / 5L)
-                            && position <= Math.min(1_500L, duration / 10L);
-            long threshold = Math.max(700L, Math.min(1_100L, duration / 15L));
-            boolean nearEnd =
-                    position >= Math.max(1_000L, duration / 2L)
-                            && duration - position <= threshold;
+                    isCompletedLoopBoundary(lastPosition, position, duration);
             long now = SystemClock.uptimeMillis();
             if (completionArmed
                     && now - lastAutoAdvanceAt > 1_500L
-                    && (nearEnd || loopBoundary)) {
+                    && loopBoundary) {
                 completionArmed = false;
                 lastAutoAdvanceAt = now;
                 autoSwitchUntil = now + AUTO_SWITCH_GRACE_MS;
                 Log.i(DouyinModule.TAG,
-                        (loopBoundary ? "loop boundary detected: " : "near completion: ")
+                        "completed loop boundary detected: "
                                 + position + "/" + duration);
                 lastPosition = position;
                 return true;
             }
 
-            if (position + 1_000L < lastPosition && !loopBoundary) {
+            if (position + 1_000L < lastPosition) {
                 completionArmed = true;
             }
             lastPosition = position;
@@ -324,6 +319,22 @@ final class PlaybackState {
             // Player variants without both timing methods rely on completion callbacks.
         }
         return false;
+    }
+
+    static boolean isCompletedLoopBoundary(
+            long previousPosition,
+            long currentPosition,
+            long duration
+    ) {
+        if (duration < 1_000L
+                || previousPosition < 0L
+                || currentPosition < 0L) {
+            return false;
+        }
+        long endWindow = Math.max(250L, Math.min(750L, duration / 20L));
+        long startWindow = Math.max(100L, Math.min(500L, duration / 20L));
+        return previousPosition >= duration - endWindow
+                && currentPosition <= startWindow;
     }
 
     static synchronized boolean consumePlaybackError() {

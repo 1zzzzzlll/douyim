@@ -22,7 +22,7 @@
 | 已验证抖音版本 | 39.7.0（versionCode 390701） |
 | Android | 9（API 28）及以上 |
 | 默认作用域 | `com.ss.android.ugc.aweme` |
-| 模块版本 | 1.3.2 |
+| 模块版本 | 1.3.3 |
 
 模块针对抖音 39.7.0 的运行时结构进行适配。抖音升级后，播放器类、数据模型或界面层级可能变化，
 届时需要重新适配。
@@ -30,7 +30,7 @@
 ## 安装
 
 1. 从 [`dist`](dist) 目录下载最新版
-   [`douxianren-lsp-api102-v1.3.2.apk`](dist/douxianren-lsp-api102-v1.3.2.apk)。
+   [`douxianren-lsp-api102-v1.3.3.apk`](dist/douxianren-lsp-api102-v1.3.3.apk)。
 2. 在手机上安装 APK。
 3. 在 LSPosed 中启用“抖仙人”模块。
 4. 保持默认作用域“抖音”，然后强制停止并重新打开抖音。
@@ -38,7 +38,7 @@
 最新版 APK 的 SHA-256：
 
 ```text
-FB97EE8CD621DE0140084FDB38D0BFD867E71A8097CE5C96BE904A28788852C8
+CD73FE4011ECED180F53438177E6753A018EEBF4E019A7026FCE227235E7C638
 ```
 
 ## 使用方式

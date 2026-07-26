@@ -371,8 +371,8 @@ final class ImmersiveUi {
             return;
         }
 
-        if (PlaybackState.consumeNearCompletion()) {
-            onPlaybackCompleted("near completion");
+        if (PlaybackState.consumeLoopBoundary()) {
+            onPlaybackCompleted("completed loop boundary");
             scheduleNextScan();
             return;
         }

@@ -35,4 +35,28 @@ public final class PlaybackStateTest {
                 1
         ));
     }
+
+    @Test
+    public void loopBoundaryRequiresPlaybackToReachTheRealEnd() {
+        assertTrue(PlaybackState.isCompletedLoopBoundary(
+                9_800L,
+                120L,
+                10_000L
+        ));
+        assertFalse(PlaybackState.isCompletedLoopBoundary(
+                8_900L,
+                120L,
+                10_000L
+        ));
+        assertFalse(PlaybackState.isCompletedLoopBoundary(
+                9_800L,
+                900L,
+                10_000L
+        ));
+        assertFalse(PlaybackState.isCompletedLoopBoundary(
+                9_800L,
+                120L,
+                900L
+        ));
+    }
 }
