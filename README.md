@@ -76,6 +76,11 @@
 Gradle 中间产物会写入系统临时目录下的 `douyin-immersive-gradle/app`，最终构建产物位于该目录的
 `outputs/apk/release` 下。仓库中经过验证、可直接安装的版本保存在 [`dist`](dist) 目录。
 
+## 交流与支持
+
+- Telegram 机器人：[@DDxianren_bot](https://t.me/DDxianren_bot)
+- Telegram 交流群：[加入抖仙人交流群](https://t.me/+Owih82lTnaVmNzFl)
+
 ## 项目结构
 
 ```text
