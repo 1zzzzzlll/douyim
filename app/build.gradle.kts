@@ -14,8 +14,8 @@ android {
         applicationId = "com.codex.douyin.immersive"
         minSdk = 28
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.3.5"
+        versionCode = 10
+        versionName = "1.3.6"
     }
 
     buildTypes {

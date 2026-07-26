@@ -79,7 +79,7 @@ public final class FeedContentTrackerTest {
     }
 
     @Test
-    public void videoAdvertisementWithPlaybackUrlRemainsPlayable() throws Exception {
+    public void videoAdvertisementWithPlaybackUrlIsFiltered() throws Exception {
         FakeAweme aweme = videoAweme(0);
         aweme.video = new FakeVideo(
                 List.of("https://example.invalid/video.mp4")
@@ -89,8 +89,8 @@ public final class FeedContentTrackerTest {
 
         FeedContentTracker.Snapshot snapshot = snapshot(aweme);
 
-        assertFalse(snapshot.shouldFilter());
-        assertFalse(snapshot.shouldFilterVisibleAdMarker());
+        assertTrue(snapshot.shouldFilter());
+        assertEquals("advertisement model", snapshot.filterReason);
         assertTrue(snapshot.hasVideo);
         assertTrue(snapshot.isAd);
         assertTrue(snapshot.hasRawAd);
@@ -99,7 +99,7 @@ public final class FeedContentTrackerTest {
     }
 
     @Test
-    public void advertisementPlaceholderVideoWaitsForRenderWatchdog()
+    public void advertisementPlaceholderVideoIsFiltered()
             throws Exception {
         FakeAweme aweme = videoAweme(140);
         aweme.isAd = true;
@@ -109,12 +109,12 @@ public final class FeedContentTrackerTest {
 
         assertTrue(snapshot.hasVideo);
         assertTrue(snapshot.playUrls.isEmpty());
-        assertFalse(snapshot.shouldFilter());
-        assertFalse(snapshot.shouldFilterVisibleAdMarker());
+        assertTrue(snapshot.shouldFilter());
+        assertEquals("advertisement model", snapshot.filterReason);
     }
 
     @Test
-    public void nonHttpAdvertisementPlaybackUrlWaitsForRenderWatchdog()
+    public void nonHttpAdvertisementPlaybackUrlIsFiltered()
             throws Exception {
         FakeAweme aweme = videoAweme(0);
         aweme.video = new FakeVideo(
@@ -125,8 +125,8 @@ public final class FeedContentTrackerTest {
         FeedContentTracker.Snapshot snapshot = snapshot(aweme);
 
         assertTrue(snapshot.playUrls.isEmpty());
-        assertFalse(snapshot.shouldFilter());
-        assertFalse(snapshot.shouldFilterVisibleAdMarker());
+        assertTrue(snapshot.shouldFilter());
+        assertEquals("advertisement model", snapshot.filterReason);
     }
 
     @Test
@@ -139,7 +139,6 @@ public final class FeedContentTrackerTest {
         FeedContentTracker.Snapshot snapshot = snapshot(aweme);
 
         assertTrue(snapshot.shouldFilter());
-        assertTrue(snapshot.shouldFilterVisibleAdMarker());
         assertEquals("advertisement model", snapshot.filterReason);
     }
 
@@ -153,7 +152,7 @@ public final class FeedContentTrackerTest {
         FeedContentTracker.Snapshot snapshot = snapshot(aweme);
 
         assertTrue(snapshot.shouldFilter());
-        assertEquals("photo article model", snapshot.filterReason);
+        assertEquals("advertisement model", snapshot.filterReason);
     }
 
     private static FakeAweme videoAweme(int awemeType) {

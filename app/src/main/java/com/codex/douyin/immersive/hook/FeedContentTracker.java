@@ -208,7 +208,7 @@ final class FeedContentTracker {
         boolean advertisement = ad || rawAd != null;
 
         String reason = null;
-        if (advertisement && video == null) {
+        if (advertisement) {
             reason = "advertisement model";
         } else if (awemeType == 0xA3) {
             reason = "long article model";
@@ -441,10 +441,6 @@ final class FeedContentTracker {
 
         boolean shouldFilter() {
             return filterReason != null;
-        }
-
-        boolean shouldFilterVisibleAdMarker() {
-            return !hasVideo;
         }
 
         boolean hasDownloadUrl() {

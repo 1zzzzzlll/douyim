@@ -32,19 +32,6 @@ final class ImmersiveUi {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final long SCAN_INTERVAL_MS = 100L;
     private static final long FALLBACK_CONTENT_CHECK_INTERVAL_MS = 900L;
-    private static final long UNRENDERED_AD_GRACE_MS = 2_000L;
-    private static final long UNRENDERED_AD_OBSERVATION_INTERVAL_MS = 250L;
-    private static final long UNRENDERED_AD_MAX_OBSERVATION_GAP_MS = 900L;
-    private static final int UNRENDERED_AD_REQUIRED_OBSERVATIONS = 3;
-    private static final String AD_FEED_ROOT_CLASS =
-            "com.ss.android.ugc.aweme.ad.feed.VideoViewHolderRootView";
-    private static final AdRenderWatchdog AD_RENDER_WATCHDOG =
-            new AdRenderWatchdog(
-                    UNRENDERED_AD_GRACE_MS,
-                    UNRENDERED_AD_OBSERVATION_INTERVAL_MS,
-                    UNRENDERED_AD_MAX_OBSERVATION_GAP_MS,
-                    UNRENDERED_AD_REQUIRED_OBSERVATIONS
-            );
     private static final Map<View, SavedView> HIDDEN =
             Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<View, Integer> ROOT_SYSTEM_UI =
@@ -84,7 +71,6 @@ final class ImmersiveUi {
     private static int filterCandidateCount;
     private static long filterCandidateAt;
     private static String lastAcceptedAid;
-    private static FeedContentTracker.Snapshot lastObservedModel;
 
     private ImmersiveUi() {
     }
@@ -111,15 +97,12 @@ final class ImmersiveUi {
                 active.clear();
                 activeRoot.clear();
                 touchInProgress = false;
-                lastObservedModel = null;
-                AD_RENDER_WATCHDOG.reset();
             }
         });
     }
 
     static void onFeedPageSelected() {
         PlaybackState.beginAutoSwitch();
-        AD_RENDER_WATCHDOG.reset();
         MAIN.post(() -> {
             transitionBoostUntil = SystemClock.uptimeMillis() + 1_200L;
             armContentFilter(120L);
@@ -154,13 +137,11 @@ final class ImmersiveUi {
                     && (action == MotionEvent.ACTION_UP
                     || action == MotionEvent.ACTION_CANCEL)) {
                 touchInProgress = false;
-                AD_RENDER_WATCHDOG.reset();
             }
             return;
         }
         if (action == MotionEvent.ACTION_DOWN) {
             touchInProgress = true;
-            AD_RENDER_WATCHDOG.reset();
             touchGestureToken++;
             touchDownX = event.getRawX();
             touchDownY = event.getRawY();
@@ -177,14 +158,12 @@ final class ImmersiveUi {
         }
         if (action == MotionEvent.ACTION_CANCEL) {
             touchInProgress = false;
-            AD_RENDER_WATCHDOG.reset();
             return;
         }
         if (action != MotionEvent.ACTION_UP) {
             return;
         }
         touchInProgress = false;
-        AD_RENDER_WATCHDOG.reset();
         long gestureId = event.getDownTime();
         if (gestureId == lastHandledTouchDownTime) {
             return;
@@ -451,77 +430,10 @@ final class ImmersiveUi {
         }
 
         boolean keepUiHidden = PlaybackState.shouldKeepUiHidden();
-        FeedContentTracker.Snapshot model = lastObservedModel;
-        View visibleAdvertisementRoot =
-                findCenteredVisibleAdvertisementRoot(decor);
         RenderViews realVideos =
                 keepUiHidden
                         ? findVisibleRealVideoViews(decor)
                         : RenderViews.EMPTY;
-        int previousMissingObservations =
-                AD_RENDER_WATCHDOG.missingObservations();
-        long renderCheckAt = SystemClock.uptimeMillis();
-        boolean userPaused = PlaybackState.isUserPaused();
-        boolean canObserveAdvertisement =
-                visibleAdvertisementRoot != null
-                        && !userPaused
-                        && !swipeRunning
-                        && !touchInProgress
-                        && renderCheckAt >= transitionBoostUntil;
-        if (!canObserveAdvertisement) {
-            AD_RENDER_WATCHDOG.reset();
-        }
-        String advertisementObservationId =
-                visibleAdvertisementRoot == null
-                        ? null
-                        : "ad-view-"
-                        + Integer.toHexString(
-                                System.identityHashCode(
-                                        visibleAdvertisementRoot
-                                )
-                        )
-                        + (model == null
-                        || model.aid == null
-                        || model.aid.isEmpty()
-                        || "unknown".equals(model.aid)
-                        ? ""
-                        : "-aid-" + model.aid);
-        String advertisementDetails =
-                (model == null
-                        ? "model=unavailable"
-                        : model.classificationDetails())
-                        + (visibleAdvertisementRoot == null
-                        ? ""
-                        : " visibleAdRoot="
-                        + visibleAdvertisementRoot.getClass().getName());
-        boolean skipUnrenderedAdvertisement =
-                canObserveAdvertisement
-                        && AD_RENDER_WATCHDOG.shouldSkip(
-                        advertisementObservationId,
-                        true,
-                        userPaused,
-                        hasValidRenderSurfaceInShell(
-                                visibleAdvertisementRoot
-                        ),
-                        renderCheckAt
-                );
-        int missingObservations = AD_RENDER_WATCHDOG.missingObservations();
-        if (missingObservations > previousMissingObservations) {
-            Log.d(DouyinModule.TAG,
-                    "unrendered advertisement candidate "
-                            + missingObservations + "/"
-                            + UNRENDERED_AD_REQUIRED_OBSERVATIONS
-                            + ": " + advertisementDetails);
-        }
-        if (skipUnrenderedAdvertisement) {
-            filterCurrentItem(
-                    decor,
-                    "advertisement without render surface "
-                            + advertisementDetails
-            );
-            scheduleNextScan();
-            return;
-        }
 
         if (!keepUiHidden) {
             restoreAll(activity, decor);
@@ -899,71 +811,6 @@ final class ImmersiveUi {
             return RenderViews.EMPTY;
         }
         return new RenderViews(visible);
-    }
-
-    private static View findCenteredVisibleAdvertisementRoot(View root) {
-        List<View> candidates = new ArrayList<>();
-        collectAdvertisementRoots(root, candidates);
-        List<View> visible = centeredVisibleVideoViews(root, candidates);
-        View resolved = null;
-        for (View candidate : visible) {
-            if (!isStrictlyVisibleToRoot(candidate, root)
-                    || !containsAdvertisementChrome(candidate)) {
-                continue;
-            }
-            if (resolved != null) {
-                return null;
-            }
-            resolved = candidate;
-        }
-        return resolved;
-    }
-
-    private static void collectAdvertisementRoots(View view, List<View> out) {
-        if (AD_FEED_ROOT_CLASS.equals(view.getClass().getName())) {
-            out.add(view);
-        }
-        if (view instanceof ViewGroup group) {
-            for (int i = 0; i < group.getChildCount(); i++) {
-                collectAdvertisementRoots(group.getChildAt(i), out);
-            }
-        }
-    }
-
-    private static boolean containsAdvertisementChrome(View view) {
-        String simpleName = view.getClass().getSimpleName();
-        if (simpleName.startsWith("AdMask")
-                || simpleName.startsWith("AdHalfWeb")) {
-            return true;
-        }
-        if (view instanceof ViewGroup group) {
-            for (int i = 0; i < group.getChildCount(); i++) {
-                if (containsAdvertisementChrome(group.getChildAt(i))) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private static boolean hasValidRenderSurfaceInShell(View shell) {
-        Rect shellVisible = new Rect();
-        if (!shell.getGlobalVisibleRect(shellVisible)) {
-            return false;
-        }
-        List<View> candidates = new ArrayList<>();
-        collectRealVideoViews(shell, candidates);
-        Rect candidateVisible = new Rect();
-        for (View candidate : candidates) {
-            if (hasValidRenderSurface(candidate)
-                    && candidate.isAttachedToWindow()
-                    && isStrictlyVisibleToRoot(candidate, shell)
-                    && candidate.getGlobalVisibleRect(candidateVisible)
-                    && Rect.intersects(shellVisible, candidateVisible)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static List<View> findVisibleVideoViews(
@@ -1416,7 +1263,6 @@ final class ImmersiveUi {
         lastContentCheckAt = now;
 
         FeedContentTracker.Snapshot model = FeedContentTracker.current(decor);
-        lastObservedModel = model;
         if (model != null) {
             if (PlaybackState.clearUserPauseForContentChange(model.aid)) {
                 transitionBoostUntil = Math.max(
@@ -1426,9 +1272,6 @@ final class ImmersiveUi {
             }
             String reason = model.shouldFilter()
                     ? model.filterReason
-                    : model.shouldFilterVisibleAdMarker()
-                    && containsVisibleAdMarker(decor)
-                    ? "advertisement marker"
                     : null;
             if (reason != null) {
                 if (!activelyArmed) {
@@ -1489,33 +1332,6 @@ final class ImmersiveUi {
         filterCandidateReason = null;
         filterCandidateCount = 0;
         filterCandidateAt = 0L;
-    }
-
-    private static boolean containsVisibleAdMarker(View root) {
-        if (root instanceof TextView textView) {
-            Rect visible = new Rect();
-            CharSequence value = textView.getText();
-            if (value == null || value.length() == 0) {
-                value = textView.getContentDescription();
-            }
-            if (value != null && textView.isShown() && textView.getGlobalVisibleRect(visible)) {
-                String marker = value.toString().trim();
-                if (marker.length() <= 12
-                        && (marker.equals("广告")
-                        || marker.startsWith("广告·")
-                        || marker.startsWith("广告 ·"))) {
-                    return true;
-                }
-            }
-        }
-        if (root instanceof ViewGroup group) {
-            for (int i = 0; i < group.getChildCount(); i++) {
-                if (containsVisibleAdMarker(group.getChildAt(i))) {
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 
     private static boolean filterCurrentItem(View decor, String reason) {
