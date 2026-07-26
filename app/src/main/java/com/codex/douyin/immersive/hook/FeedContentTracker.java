@@ -7,10 +7,12 @@ import android.view.View;
 
 import java.lang.annotation.Annotation;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -64,6 +66,7 @@ final class FeedContentTracker {
                         Object panel = chain.getThisObject();
                         remember(panel);
                         selectedPanel = new WeakReference<>(panel);
+                        ImmersiveUi.onFeedPageSelected();
                         return result;
                     });
         } catch (NoSuchMethodException error) {
@@ -127,9 +130,10 @@ final class FeedContentTracker {
                 if (aweme == null) {
                     continue;
                 }
-                long score = area * 1_000_000L
-                        - Math.min(999_999L, Math.max(0L, now - recent))
-                        + (panel == selected ? 250_000L : 0L);
+                long agePenalty = Math.min(999_999L, Math.max(0L, now - recent));
+                long score = panel == selected
+                        ? Long.MAX_VALUE - agePenalty
+                        : area * 1_000_000L - agePenalty;
                 if (score > bestScore) {
                     bestScore = score;
                     bestAweme = aweme;
@@ -170,24 +174,47 @@ final class FeedContentTracker {
         int awemeType = intValue(readField(type, aweme, "awemeType"), -1);
         boolean ad = booleanValue(readField(type, aweme, "isAd"));
         Object rawAd = invokeNoArg(type, aweme, "getAwemeRawAd");
+        boolean hostImage = booleanValue(invokeNoArg(type, aweme, "isImage"));
+        boolean hostMultiImage =
+                booleanValue(invokeNoArg(type, aweme, "isMultiImage"));
+        boolean slides = booleanValue(readField(type, aweme, "isSlides"));
         Object video = readField(type, aweme, "video");
         if (video == null) {
             video = readSerializedField(aweme, "video");
         }
         Object article = readField(type, aweme, "articleInfo");
+        if (article == null) {
+            article = readSerializedField(aweme, "article_info");
+        }
         Object images = readField(type, aweme, "images");
-        int imageCount = images instanceof List<?> list ? list.size() : 0;
+        if (images == null) {
+            images = readSerializedField(aweme, "images");
+        }
+        Object imageInfos = readField(type, aweme, "imageInfos");
+        if (imageInfos == null) {
+            imageInfos = readSerializedField(aweme, "image_infos");
+        }
+        int imageCount = collectionSize(images);
+        int imageInfoCount = collectionSize(imageInfos);
         List<PlayUrl> playUrls = resolvePlayUrls(video);
+        boolean photo =
+                hostImage
+                        || hostMultiImage
+                        || slides
+                        || awemeType == 2
+                        || awemeType == 0x44
+                        || imageCount > 0
+                        || imageInfoCount > 0;
 
         String reason = null;
-        if (ad) {
+        if (ad || rawAd != null) {
             reason = "advertisement model";
         } else if (awemeType == 0xA3) {
             reason = "long article model";
+        } else if (photo) {
+            reason = "photo article model";
         } else if (video == null) {
-            if (awemeType == 0x44 || imageCount > 0) {
-                reason = "photo article model";
-            } else if (article != null) {
+            if (article != null) {
                 reason = "article model";
             } else {
                 reason = "non-video model";
@@ -201,6 +228,10 @@ final class FeedContentTracker {
                 rawAd != null,
                 article != null,
                 imageCount,
+                imageInfoCount,
+                hostImage,
+                hostMultiImage,
+                slides,
                 reason,
                 playUrls
         );
@@ -343,7 +374,19 @@ final class FeedContentTracker {
     }
 
     private static boolean booleanValue(Object value) {
-        return value instanceof Boolean bool && bool;
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        return value instanceof Number number && number.intValue() != 0;
+    }
+
+    private static int collectionSize(Object value) {
+        if (value instanceof Collection<?> collection) {
+            return collection.size();
+        }
+        return value != null && value.getClass().isArray()
+                ? Array.getLength(value)
+                : 0;
     }
 
     private static String stringValue(Object value) {
@@ -358,6 +401,10 @@ final class FeedContentTracker {
         final boolean hasRawAd;
         final boolean hasArticle;
         final int imageCount;
+        final int imageInfoCount;
+        final boolean hostImage;
+        final boolean hostMultiImage;
+        final boolean slides;
         final String filterReason;
         final List<PlayUrl> playUrls;
 
@@ -369,6 +416,10 @@ final class FeedContentTracker {
                 boolean hasRawAd,
                 boolean hasArticle,
                 int imageCount,
+                int imageInfoCount,
+                boolean hostImage,
+                boolean hostMultiImage,
+                boolean slides,
                 String filterReason,
                 List<PlayUrl> playUrls
         ) {
@@ -379,6 +430,10 @@ final class FeedContentTracker {
             this.hasRawAd = hasRawAd;
             this.hasArticle = hasArticle;
             this.imageCount = imageCount;
+            this.imageInfoCount = imageInfoCount;
+            this.hostImage = hostImage;
+            this.hostMultiImage = hostMultiImage;
+            this.slides = slides;
             this.filterReason = filterReason;
             this.playUrls = playUrls;
         }
@@ -398,7 +453,11 @@ final class FeedContentTracker {
                     + " isAd=" + isAd
                     + " rawAd=" + hasRawAd
                     + " article=" + hasArticle
-                    + " images=" + imageCount;
+                    + " images=" + imageCount
+                    + " imageInfos=" + imageInfoCount
+                    + " hostImage=" + hostImage
+                    + " hostMultiImage=" + hostMultiImage
+                    + " slides=" + slides;
         }
     }
 

@@ -27,6 +27,9 @@ final class PlaybackState {
     private static volatile long generation;
     private static volatile int lastResolvedState = Integer.MIN_VALUE;
     private static volatile long pausedAt;
+    private static volatile long lastPauseSignalAt;
+    private static volatile WeakReference<Object> lastPauseSignalEngine =
+            new WeakReference<>(null);
 
     private static volatile Object trackedPlayer;
     private static volatile long trackedDuration;
@@ -48,11 +51,27 @@ final class PlaybackState {
         markPlaying(player, false, true);
     }
 
-    private static void markPlaying(
+    private static synchronized void markPlaying(
             Object player,
             boolean explicitPlayCall,
             boolean confirmedPlaying
     ) {
+        boolean clearUserPause = false;
+        boolean sameEngineResumed = false;
+        if (userPaused) {
+            long now = SystemClock.uptimeMillis();
+            Object pausedPlayer = userPausedEngine.get();
+            sameEngineResumed =
+                    player != null
+                            && player == pausedPlayer
+                            && (explicitPlayCall
+                            || confirmedPlaying
+                            || playbackState(player) == 1);
+            if (now > expectedVideoSwitchUntil && !sameEngineResumed) {
+                return;
+            }
+            clearUserPause = true;
+        }
         if (player != null) {
             CANDIDATE_PLAYERS.put(player, SystemClock.uptimeMillis());
             Object current = engine.get();
@@ -71,15 +90,15 @@ final class PlaybackState {
                 return;
             }
         }
-        if (userPaused) {
-            if (SystemClock.uptimeMillis() > expectedVideoSwitchUntil) {
-                return;
-            }
+        if (clearUserPause && userPaused) {
             userPaused = false;
             userPausedAt = 0L;
             userPausedEngine.clear();
             expectedVideoSwitchUntil = 0L;
-            Log.i(DouyinModule.TAG, "new video confirmed after paused swipe");
+            Log.i(DouyinModule.TAG,
+                    sameEngineResumed
+                            ? "cleared user pause after confirmed resume"
+                            : "new video confirmed after paused swipe");
         }
         playing = true;
         pausedAt = 0L;
@@ -91,7 +110,7 @@ final class PlaybackState {
         ImmersiveUi.onPlaybackChanged(true);
     }
 
-    static void paused(Object player) {
+    static synchronized void paused(Object player) {
         Object current = engine.get();
         if (player != null && current != null && player != current) {
             Log.d(DouyinModule.TAG, "ignored pause from stale player "
@@ -101,9 +120,11 @@ final class PlaybackState {
         if (player != null && current == null) {
             engine = new WeakReference<>(player);
         }
+        lastPauseSignalAt = SystemClock.uptimeMillis();
+        lastPauseSignalEngine = new WeakReference<>(player);
         playing = false;
         if (pausedAt == 0L) {
-            pausedAt = SystemClock.uptimeMillis();
+            pausedAt = lastPauseSignalAt;
         }
         generation++;
         Log.i(DouyinModule.TAG, "playback=paused");
@@ -178,26 +199,72 @@ final class PlaybackState {
         return userPaused;
     }
 
-    static boolean shouldKeepUiHidden() {
+    static int engineState(Object candidate) {
+        return playbackState(candidate);
+    }
+
+    static synchronized boolean confirmUserPaused(
+            Object expectedEngine,
+            long uptimeMillis,
+            int initialState
+    ) {
+        if (expectedEngine == null) {
+            return false;
+        }
+        boolean matchingCallback =
+                lastPauseSignalEngine.get() == expectedEngine
+                        && lastPauseSignalAt >= uptimeMillis;
+        boolean confirmed =
+                engine.get() == expectedEngine
+                && (matchingCallback
+                || (initialState == 1
+                && playbackState(expectedEngine) == 2));
+        if (!confirmed) {
+            return false;
+        }
+        userPaused = true;
+        userPausedAt = SystemClock.uptimeMillis();
+        userPausedEngine = new WeakReference<>(expectedEngine);
+        expectedVideoSwitchUntil = 0L;
+        autoSwitchUntil = 0L;
+        playing = false;
+        pausedAt = 0L;
+        generation++;
+        Log.i(DouyinModule.TAG, "playback=user-paused");
+        return true;
+    }
+
+    static synchronized boolean shouldKeepUiHidden() {
         if (userPaused) {
             Object pausedPlayer = userPausedEngine.get();
-            if (pausedPlayer == null
-                    || SystemClock.uptimeMillis() - userPausedAt < 600L
-                    || playbackState(pausedPlayer) != 1) {
+            long pauseAge = SystemClock.uptimeMillis() - userPausedAt;
+            if (pausedPlayer == null) {
+                if (pauseAge < 1_500L) {
+                    return false;
+                }
+                userPaused = false;
+                userPausedAt = 0L;
+                userPausedEngine.clear();
+                playing = true;
+                pausedAt = 0L;
+                Log.w(DouyinModule.TAG,
+                        "cleared unbacked stale user pause");
+            } else if (pauseAge < 600L || playbackState(pausedPlayer) != 1) {
                 return false;
+            } else {
+                userPaused = false;
+                userPausedAt = 0L;
+                userPausedEngine.clear();
+                playing = true;
+                pausedAt = 0L;
+                Log.i(DouyinModule.TAG,
+                        "cleared stale user pause because the same video is playing");
             }
-            userPaused = false;
-            userPausedAt = 0L;
-            userPausedEngine.clear();
-            playing = true;
-            pausedAt = 0L;
-            Log.i(DouyinModule.TAG,
-                    "cleared stale user pause because the same video is playing");
         }
-        long now = SystemClock.uptimeMillis();
-        return now < autoSwitchUntil
-                || isPlaying()
-                || (pausedAt != 0L && now - pausedAt < TRANSITION_GRACE_MS);
+        // Host engines emit pause/stop/release callbacks for preloaded and recycled
+        // players. Only an explicitly confirmed user pause may expose the host UI;
+        // otherwise the visible current renderer remains in immersive mode.
+        return true;
     }
 
     static synchronized boolean consumeNearCompletion() {
@@ -338,19 +405,7 @@ final class PlaybackState {
         return engine.get();
     }
 
-    static void userPaused() {
-        userPaused = true;
-        userPausedAt = SystemClock.uptimeMillis();
-        userPausedEngine = new WeakReference<>(engine.get());
-        expectedVideoSwitchUntil = 0L;
-        autoSwitchUntil = 0L;
-        playing = false;
-        pausedAt = 0L;
-        generation++;
-        Log.i(DouyinModule.TAG, "playback=user-paused");
-    }
-
-    static void userPlaying() {
+    static synchronized void userPlaying() {
         userPaused = false;
         userPausedAt = 0L;
         userPausedEngine.clear();
@@ -359,7 +414,7 @@ final class PlaybackState {
         Log.i(DouyinModule.TAG, "playback=user-resumed");
     }
 
-    static void beginAutoSwitch() {
+    static synchronized void beginAutoSwitch() {
         long now = SystemClock.uptimeMillis();
         autoSwitchUntil = now + AUTO_SWITCH_GRACE_MS;
         if (userPaused) {
@@ -368,7 +423,7 @@ final class PlaybackState {
         }
     }
 
-    static void confirmVideoSwitch() {
+    static synchronized void confirmVideoSwitch() {
         autoSwitchUntil = 0L;
         errorAt = 0L;
         resetProgressTracking(engine.get());

@@ -14,8 +14,8 @@ android {
         applicationId = "com.codex.douyin.immersive"
         minSdk = 28
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.3.0"
+        versionCode = 5
+        versionName = "1.3.1"
     }
 
     buildTypes {
@@ -54,4 +54,6 @@ android {
 
 dependencies {
     compileOnly(libs.libxposed.api)
+    testImplementation(libs.libxposed.api)
+    testImplementation("junit:junit:4.13.2")
 }

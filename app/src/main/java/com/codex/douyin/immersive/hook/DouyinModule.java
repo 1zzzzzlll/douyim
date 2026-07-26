@@ -37,17 +37,36 @@ public final class DouyinModule extends XposedModule {
             }
         }
 
+        installSubsystem("activity lifecycle", this::hookActivityLifecycle);
+        installSubsystem("activity touch", this::hookActivityTouch);
+        installSubsystem("instrumentation lifecycle", this::hookInstrumentationLifecycle);
+        installSubsystem(
+                "Douyin activity lifecycle",
+                () -> hookDouyinActivityLifecycle(param.getClassLoader())
+        );
+        installSubsystem(
+                "feed content tracker",
+                () -> FeedContentTracker.install(this, param.getClassLoader())
+        );
+        installSubsystem(
+                "player tracker",
+                () -> PlayerHooks.install(this, param.getClassLoader())
+        );
+        log(Log.INFO, TAG, "hook installation finished for " + param.getPackageName());
+    }
+
+    private void installSubsystem(String name, HookInstaller installer) {
         try {
-            hookActivityLifecycle();
-            hookActivityTouch();
-            hookInstrumentationLifecycle();
-            hookDouyinActivityLifecycle(param.getClassLoader());
-            FeedContentTracker.install(this, param.getClassLoader());
-            PlayerHooks.install(this, param.getClassLoader());
-            log(Log.INFO, TAG, "hooks installed for " + param.getPackageName());
+            installer.install();
+            log(Log.INFO, TAG, "hook subsystem installed: " + name);
         } catch (Throwable error) {
-            log(Log.ERROR, TAG, "failed to install hooks", error);
+            log(Log.ERROR, TAG, "hook subsystem failed: " + name, error);
         }
+    }
+
+    @FunctionalInterface
+    private interface HookInstaller {
+        void install() throws Throwable;
     }
 
     private void hookActivityTouch() throws NoSuchMethodException {

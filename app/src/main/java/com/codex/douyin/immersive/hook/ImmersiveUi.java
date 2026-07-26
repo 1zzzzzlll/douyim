@@ -31,6 +31,7 @@ import java.util.WeakHashMap;
 final class ImmersiveUi {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final long SCAN_INTERVAL_MS = 100L;
+    private static final long FALLBACK_CONTENT_CHECK_INTERVAL_MS = 900L;
     private static final Map<View, SavedView> HIDDEN =
             Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<View, Integer> ROOT_SYSTEM_UI =
@@ -42,14 +43,18 @@ final class ImmersiveUi {
     private static WeakReference<View> activeRoot = new WeakReference<>(null);
     private static boolean scanScheduled;
     private static boolean swipeRunning;
+    private static long swipeToken;
     private static boolean videoMissingLogged;
     private static boolean activityResolveErrorLogged;
+    private static long lastScanFailureAt;
     private static long transitionBoostUntil;
     private static float touchDownX;
     private static float touchDownY;
     private static long touchDownAt;
     private static long touchGestureToken;
     private static String touchDownAid;
+    private static Object touchDownEngine;
+    private static int touchDownEngineState;
     private static WeakReference<TextView> downloadButton =
             new WeakReference<>(null);
     private static long lastHandledTouchDownTime;
@@ -93,6 +98,15 @@ final class ImmersiveUi {
         });
     }
 
+    static void onFeedPageSelected() {
+        MAIN.post(() -> {
+            transitionBoostUntil = SystemClock.uptimeMillis() + 1_200L;
+            PlaybackState.beginAutoSwitch();
+            armContentFilter(120L);
+            scheduleScan(0L);
+        });
+    }
+
     static void onActivityTouch(Activity activity, MotionEvent event) {
         if (swipeRunning) {
             return;
@@ -106,6 +120,8 @@ final class ImmersiveUi {
             View decor = activeDecor(activity);
             FeedContentTracker.Snapshot model = FeedContentTracker.current(decor);
             touchDownAid = model == null ? lastAcceptedAid : model.aid;
+            touchDownEngine = PlaybackState.engine();
+            touchDownEngineState = PlaybackState.engineState(touchDownEngine);
             return;
         }
         if (action != MotionEvent.ACTION_UP) {
@@ -152,17 +168,75 @@ final class ImmersiveUi {
         }
 
         boolean resumeRequested = PlaybackState.isUserPaused();
-        MAIN.postDelayed(() -> {
-            if (!resumeRequested) {
-                PlaybackState.userPaused();
-                restoreAll(activity, decor);
-                showDownloadButton(activity, decor);
-            } else {
+        long gestureToken = touchGestureToken;
+        long pauseIntentAt = touchDownAt;
+        Object pauseIntentEngine = touchDownEngine;
+        int pauseIntentInitialState = touchDownEngineState;
+        touchDownEngine = null;
+        if (resumeRequested) {
+            MAIN.postDelayed(() -> {
+                if (gestureToken != touchGestureToken
+                        || !PlaybackState.isUserPaused()) {
+                    return;
+                }
                 PlaybackState.userPlaying();
                 removeDownloadButton();
                 scheduleScan(0L);
+            }, 220L);
+        } else {
+            confirmUserPause(
+                    gestureToken,
+                    pauseIntentAt,
+                    pauseIntentEngine,
+                    pauseIntentInitialState,
+                    activity,
+                    decor,
+                    4
+            );
+        }
+    }
+
+    private static void confirmUserPause(
+            long gestureToken,
+            long pauseIntentAt,
+            Object pauseIntentEngine,
+            int pauseIntentInitialState,
+            Activity activity,
+            View decor,
+            int attemptsLeft
+    ) {
+        MAIN.postDelayed(() -> {
+            if (gestureToken != touchGestureToken
+                    || PlaybackState.isUserPaused()) {
+                return;
             }
-        }, 120L);
+            boolean confirmedPause =
+                    PlaybackState.confirmUserPaused(
+                            pauseIntentEngine,
+                            pauseIntentAt,
+                            pauseIntentInitialState
+                    );
+            if (confirmedPause) {
+                restoreAll(activity, decor);
+                showDownloadButton(activity, decor);
+                return;
+            }
+            if (attemptsLeft > 1) {
+                confirmUserPause(
+                        gestureToken,
+                        pauseIntentAt,
+                        pauseIntentEngine,
+                        pauseIntentInitialState,
+                        activity,
+                        decor,
+                        attemptsLeft - 1
+                );
+            } else {
+                Log.d(DouyinModule.TAG,
+                        "ignored center tap because playback stayed active");
+                scheduleScan(0L);
+            }
+        }, 180L);
     }
 
     private static void confirmUserFeedSwitch(long token,
@@ -239,6 +313,23 @@ final class ImmersiveUi {
 
     private static void scan() {
         scanScheduled = false;
+        try {
+            scanOnce();
+        } catch (Throwable error) {
+            long now = SystemClock.uptimeMillis();
+            if (now - lastScanFailureAt >= 2_000L) {
+                lastScanFailureAt = now;
+                Log.e(DouyinModule.TAG,
+                        "immersive UI scan failed; watchdog will retry", error);
+            }
+        } finally {
+            if (!scanScheduled) {
+                scheduleScan(SCAN_INTERVAL_MS);
+            }
+        }
+    }
+
+    private static void scanOnce() {
         Activity activity = activeActivity();
         View decor = activeDecor(activity);
         if (decor == null) {
@@ -281,9 +372,13 @@ final class ImmersiveUi {
             restoreVideoPaths(videos);
             hideOutsideVideoPaths(decor, videos);
             hideSystemBars(activity, decor);
-        } else if (!videoMissingLogged) {
-            videoMissingLogged = true;
-            Log.w(DouyinModule.TAG, "no large video SurfaceView/TextureView found");
+        } else {
+            restoreAll(activity, decor);
+            if (!videoMissingLogged) {
+                videoMissingLogged = true;
+                Log.w(DouyinModule.TAG,
+                        "no centered visible video SurfaceView/TextureView found");
+            }
         }
         scheduleNextScan();
     }
@@ -626,17 +721,44 @@ final class ImmersiveUi {
     private static List<View> findVisibleVideoViews(View root) {
         List<View> candidates = new ArrayList<>();
         collectRealVideoViews(root, candidates);
-        if (candidates.isEmpty()) {
-            collectFallbackVideoViews(root, candidates);
+        List<View> visible = centeredVisibleVideoViews(root, candidates);
+        if (!visible.isEmpty()) {
+            return visible;
         }
+        candidates.clear();
+        collectFallbackVideoViews(root, candidates);
+        return centeredVisibleVideoViews(root, candidates);
+    }
+
+    private static List<View> centeredVisibleVideoViews(
+            View root,
+            List<View> candidates
+    ) {
+        Rect rootVisible = new Rect();
+        if (!root.getGlobalVisibleRect(rootVisible)) {
+            return Collections.emptyList();
+        }
+        int centerX = rootVisible.centerX();
+        int centerY = rootVisible.centerY();
+        long screenArea =
+                (long) Math.max(1, rootVisible.width())
+                        * Math.max(1, rootVisible.height());
         List<View> videoPaths = new ArrayList<>();
-        long screenArea = (long) Math.max(1, root.getWidth()) * Math.max(1, root.getHeight());
+        Rect visible = new Rect();
         for (View candidate : candidates) {
-            if (!candidate.isAttachedToWindow()) {
+            boolean alphaVisible =
+                    candidate.getAlpha() > 0.05f || HIDDEN.containsKey(candidate);
+            if (!candidate.isAttachedToWindow()
+                    || candidate.getVisibility() != View.VISIBLE
+                    || !candidate.isShown()
+                    || !alphaVisible
+                    || !candidate.getGlobalVisibleRect(visible)
+                    || !visible.contains(centerX, centerY)) {
                 continue;
             }
-            long area = (long) candidate.getWidth() * candidate.getHeight();
-            if (area >= screenArea / 5L) {
+            long area = (long) visible.width() * visible.height();
+            if (area >= screenArea / 5L
+                    && !videoPaths.contains(candidate)) {
                 videoPaths.add(candidate);
             }
         }
@@ -904,6 +1026,7 @@ final class ImmersiveUi {
             return false;
         }
         swipeRunning = true;
+        long currentSwipeToken = ++swipeToken;
         lastSwipeAt = now;
         PlaybackState.beginAutoSwitch();
         armContentFilter(700L);
@@ -913,22 +1036,66 @@ final class ImmersiveUi {
         final float startY = height * 0.72f;
         final float endY = height * 0.24f;
         final long downTime = SystemClock.uptimeMillis();
-        dispatch(decor, downTime, downTime, MotionEvent.ACTION_DOWN, x, startY);
+        try {
+            dispatch(decor, downTime, downTime, MotionEvent.ACTION_DOWN, x, startY);
+        } catch (Throwable error) {
+            finishSwipe(currentSwipeToken, "initial dispatch failed", error);
+            return false;
+        }
+        MAIN.postDelayed(
+                () -> finishSwipe(currentSwipeToken, "watchdog timeout", null),
+                1_200L
+        );
 
         int steps = 8;
         for (int i = 1; i <= steps; i++) {
             final int step = i;
             MAIN.postDelayed(() -> {
+                if (!swipeRunning || currentSwipeToken != swipeToken) {
+                    return;
+                }
                 float fraction = step / (float) steps;
                 float y = startY + (endY - startY) * fraction;
                 int action = step == steps ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE;
-                dispatch(decor, downTime, SystemClock.uptimeMillis(), action, x, y);
+                try {
+                    dispatch(
+                            decor,
+                            downTime,
+                            SystemClock.uptimeMillis(),
+                            action,
+                            x,
+                            y
+                    );
+                } catch (Throwable error) {
+                    finishSwipe(currentSwipeToken, "gesture dispatch failed", error);
+                    return;
+                }
                 if (step == steps) {
-                    MAIN.postDelayed(() -> swipeRunning = false, 500L);
+                    MAIN.postDelayed(
+                            () -> finishSwipe(currentSwipeToken, null, null),
+                            500L
+                    );
                 }
             }, i * 22L);
         }
         return true;
+    }
+
+    private static void finishSwipe(long token, String reason, Throwable error) {
+        if (token != swipeToken || !swipeRunning) {
+            return;
+        }
+        swipeRunning = false;
+        if (reason != null) {
+            if (error == null) {
+                Log.w(DouyinModule.TAG,
+                        "synthetic swipe recovered: " + reason);
+            } else {
+                Log.w(DouyinModule.TAG,
+                        "synthetic swipe recovered: " + reason, error);
+            }
+        }
+        scheduleScan(0L);
     }
 
     private static void dispatch(View view, long downTime, long eventTime,
@@ -952,11 +1119,18 @@ final class ImmersiveUi {
 
     private static boolean checkCurrentFeedContent(View decor) {
         long now = SystemClock.uptimeMillis();
-        if (now < contentCheckNotBefore
-                || now > contentCheckUntil
-                || now - lastContentCheckAt < 220L
+        boolean candidatePending =
+                filterCandidateCount > 0 && now - filterCandidateAt <= 900L;
+        if (now < contentCheckNotBefore) {
+            return candidatePending;
+        }
+        boolean activelyArmed = now <= contentCheckUntil || candidatePending;
+        long minimumInterval = activelyArmed
+                ? 220L
+                : FALLBACK_CONTENT_CHECK_INTERVAL_MS;
+        if (now - lastContentCheckAt < minimumInterval
                 || now - lastFilteredSwipeAt < 1_500L) {
-            return false;
+            return candidatePending;
         }
         lastContentCheckAt = now;
 
@@ -968,13 +1142,18 @@ final class ImmersiveUi {
                     ? "advertisement marker"
                     : null;
             if (reason != null) {
-                if (!confirmFilterCandidate(model.aid, reason, now)) {
-                    return false;
+                if (!activelyArmed) {
+                    contentCheckNotBefore = 0L;
+                    contentCheckUntil = now + 2_500L;
                 }
-                return filterCurrentItem(
+                if (!confirmFilterCandidate(model.aid, reason, now)) {
+                    return true;
+                }
+                filterCurrentItem(
                         decor,
                         reason + " " + model.classificationDetails()
                 );
+                return true;
             }
             resetFilterCandidate();
             if (!model.aid.equals(lastAcceptedAid)) {
@@ -987,13 +1166,19 @@ final class ImmersiveUi {
         }
 
         if (containsVisibleAdMarker(decor)) {
-            if (confirmFilterCandidate("unknown", "advertisement marker", now)) {
-                return filterCurrentItem(decor, "advertisement marker");
+            if (!activelyArmed) {
+                contentCheckNotBefore = 0L;
+                contentCheckUntil = now + 2_500L;
             }
-            return false;
+            if (confirmFilterCandidate("unknown", "advertisement marker", now)) {
+                filterCurrentItem(decor, "advertisement marker");
+            }
+            return true;
         }
-        resetFilterCandidate();
-        return false;
+        if (!candidatePending) {
+            resetFilterCandidate();
+        }
+        return candidatePending;
     }
 
     private static boolean confirmFilterCandidate(
