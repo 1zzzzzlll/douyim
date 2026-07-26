@@ -205,11 +205,10 @@ final class FeedContentTracker {
                         || awemeType == 0x44
                         || imageCount > 0
                         || imageInfoCount > 0;
+        boolean advertisement = ad || rawAd != null;
 
         String reason = null;
-        // Sponsored entries can still be ordinary playable videos. Only use the
-        // ad model as a filter when the host exposes no video for the entry.
-        if ((ad || rawAd != null) && video == null) {
+        if (advertisement && video == null) {
             reason = "advertisement model";
         } else if (awemeType == 0xA3) {
             reason = "long article model";
@@ -452,6 +451,10 @@ final class FeedContentTracker {
             return !playUrls.isEmpty();
         }
 
+        boolean isAdvertisement() {
+            return isAd || hasRawAd;
+        }
+
         String classificationDetails() {
             return "aid=" + aid
                     + " type=" + awemeType
@@ -463,7 +466,8 @@ final class FeedContentTracker {
                     + " imageInfos=" + imageInfoCount
                     + " hostImage=" + hostImage
                     + " hostMultiImage=" + hostMultiImage
-                    + " slides=" + slides;
+                    + " slides=" + slides
+                    + " playUrls=" + playUrls.size();
         }
     }
 

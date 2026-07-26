@@ -13,15 +13,20 @@ final class PlaybackState {
     private static final long TRANSITION_GRACE_MS = 2_000L;
     private static final long AUTO_SWITCH_GRACE_MS = 2_500L;
     private static final long ERROR_CONFIRM_MS = 900L;
+    private static final long PENDING_SWITCH_PLAYER_MAX_AGE_MS = 1_000L;
 
     private static volatile boolean playing = true;
     private static volatile boolean userPaused;
     private static volatile long userPausedAt;
     private static volatile WeakReference<Object> userPausedEngine =
             new WeakReference<>(null);
+    private static volatile String userPausedAid;
     private static volatile long expectedVideoSwitchUntil;
     private static volatile long autoSwitchUntil;
     private static volatile WeakReference<Object> engine = new WeakReference<>(null);
+    private static volatile WeakReference<Object> pendingSwitchPlayer =
+            new WeakReference<>(null);
+    private static volatile long pendingSwitchPlayerAt;
     private static final Map<Object, Long> CANDIDATE_PLAYERS =
             Collections.synchronizedMap(new WeakHashMap<>());
     private static volatile long generation;
@@ -56,10 +61,16 @@ final class PlaybackState {
             boolean explicitPlayCall,
             boolean confirmedPlaying
     ) {
+        long now = SystemClock.uptimeMillis();
+        if (player != null) {
+            // Keep a playing candidate even when a paused-feed transition has
+            // not opened its acceptance window yet. The visible aid check can
+            // then recover the correct active engine after the page changes.
+            CANDIDATE_PLAYERS.put(player, now);
+        }
         boolean clearUserPause = false;
         boolean sameEngineResumed = false;
         if (userPaused) {
-            long now = SystemClock.uptimeMillis();
             Object pausedPlayer = userPausedEngine.get();
             sameEngineResumed =
                     player != null
@@ -68,12 +79,17 @@ final class PlaybackState {
                             || confirmedPlaying
                             || playbackState(player) == 1);
             if (now > expectedVideoSwitchUntil && !sameEngineResumed) {
+                if (player != null
+                        && (confirmedPlaying || playbackState(player) == 1)) {
+                    pendingSwitchPlayer =
+                            new WeakReference<>(player);
+                    pendingSwitchPlayerAt = now;
+                }
                 return;
             }
             clearUserPause = true;
         }
         if (player != null) {
-            CANDIDATE_PLAYERS.put(player, SystemClock.uptimeMillis());
             Object current = engine.get();
             int state = playbackState(player);
             boolean adopt =
@@ -94,6 +110,8 @@ final class PlaybackState {
             userPaused = false;
             userPausedAt = 0L;
             userPausedEngine.clear();
+            userPausedAid = null;
+            clearPendingSwitchPlayer();
             expectedVideoSwitchUntil = 0L;
             Log.i(DouyinModule.TAG,
                     sameEngineResumed
@@ -206,7 +224,8 @@ final class PlaybackState {
     static synchronized boolean confirmUserPaused(
             Object expectedEngine,
             long uptimeMillis,
-            int initialState
+            int initialState,
+            String aid
     ) {
         if (expectedEngine == null) {
             return false;
@@ -225,6 +244,8 @@ final class PlaybackState {
         userPaused = true;
         userPausedAt = SystemClock.uptimeMillis();
         userPausedEngine = new WeakReference<>(expectedEngine);
+        userPausedAid = knownAid(aid) ? aid : null;
+        clearPendingSwitchPlayer();
         expectedVideoSwitchUntil = 0L;
         autoSwitchUntil = 0L;
         playing = false;
@@ -245,6 +266,8 @@ final class PlaybackState {
                 userPaused = false;
                 userPausedAt = 0L;
                 userPausedEngine.clear();
+                userPausedAid = null;
+                clearPendingSwitchPlayer();
                 playing = true;
                 pausedAt = 0L;
                 Log.w(DouyinModule.TAG,
@@ -255,6 +278,8 @@ final class PlaybackState {
                 userPaused = false;
                 userPausedAt = 0L;
                 userPausedEngine.clear();
+                userPausedAid = null;
+                clearPendingSwitchPlayer();
                 playing = true;
                 pausedAt = 0L;
                 Log.i(DouyinModule.TAG,
@@ -447,9 +472,42 @@ final class PlaybackState {
         userPaused = false;
         userPausedAt = 0L;
         userPausedEngine.clear();
+        userPausedAid = null;
+        clearPendingSwitchPlayer();
         expectedVideoSwitchUntil = 0L;
         markPlaying(null, false, true);
         Log.i(DouyinModule.TAG, "playback=user-resumed");
+    }
+
+    static synchronized boolean clearUserPauseForContentChange(String visibleAid) {
+        String pausedAid = userPausedAid;
+        if (!userPaused
+                || !isDifferentKnownContent(pausedAid, visibleAid)) {
+            return false;
+        }
+        userPaused = false;
+        userPausedAt = 0L;
+        userPausedEngine.clear();
+        userPausedAid = null;
+        clearPendingSwitchPlayer();
+        expectedVideoSwitchUntil = 0L;
+        markPlaying(null, false, true);
+        Log.i(DouyinModule.TAG,
+                "cleared user pause after feed item changed: "
+                        + pausedAid + " -> " + visibleAid);
+        return true;
+    }
+
+    static boolean isDifferentKnownContent(String previousAid, String currentAid) {
+        return knownAid(previousAid)
+                && knownAid(currentAid)
+                && !previousAid.equals(currentAid);
+    }
+
+    private static boolean knownAid(String aid) {
+        return aid != null
+                && !aid.isEmpty()
+                && !"unknown".equals(aid);
     }
 
     static synchronized void beginAutoSwitch() {
@@ -458,7 +516,46 @@ final class PlaybackState {
         if (userPaused) {
             expectedVideoSwitchUntil = autoSwitchUntil;
             Log.d(DouyinModule.TAG, "waiting for new video after paused swipe");
+            Object candidate = pendingSwitchPlayer.get();
+            Object pausedPlayer = userPausedEngine.get();
+            int candidateState = playbackState(candidate);
+            if (isRecentSwitchCandidate(
+                    candidate,
+                    pausedPlayer,
+                    candidateState,
+                    pendingSwitchPlayerAt,
+                    now
+            )) {
+                clearPendingSwitchPlayer();
+                Log.i(DouyinModule.TAG,
+                        "adopting pending player after paused feed switch");
+                markPlaying(candidate, false, true);
+            } else if (candidate == null
+                    || now - pendingSwitchPlayerAt
+                    > PENDING_SWITCH_PLAYER_MAX_AGE_MS) {
+                clearPendingSwitchPlayer();
+            }
         }
+    }
+
+    static boolean isRecentSwitchCandidate(
+            Object candidate,
+            Object pausedPlayer,
+            int candidateState,
+            long candidateAt,
+            long now
+    ) {
+        return candidate != null
+                && candidate != pausedPlayer
+                && candidateState == 1
+                && candidateAt > 0L
+                && now >= candidateAt
+                && now - candidateAt <= PENDING_SWITCH_PLAYER_MAX_AGE_MS;
+    }
+
+    private static void clearPendingSwitchPlayer() {
+        pendingSwitchPlayer.clear();
+        pendingSwitchPlayerAt = 0L;
     }
 
     static synchronized void confirmVideoSwitch() {

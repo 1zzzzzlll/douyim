@@ -4,6 +4,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import com.google.gson.annotations.SerializedName;
+
 import org.junit.Test;
 
 import java.lang.reflect.Method;
@@ -67,7 +69,7 @@ public final class FeedContentTrackerTest {
     }
 
     @Test
-    public void ordinaryVideoRemainsAccepted() throws Exception {
+    public void ordinaryNonAdPlaceholderVideoRemainsAccepted() throws Exception {
         FakeAweme aweme = videoAweme(0);
 
         FeedContentTracker.Snapshot snapshot = snapshot(aweme);
@@ -77,8 +79,11 @@ public final class FeedContentTrackerTest {
     }
 
     @Test
-    public void videoAdvertisementRemainsPlayable() throws Exception {
+    public void videoAdvertisementWithPlaybackUrlRemainsPlayable() throws Exception {
         FakeAweme aweme = videoAweme(0);
+        aweme.video = new FakeVideo(
+                List.of("https://example.invalid/video.mp4")
+        );
         aweme.isAd = true;
         aweme.rawAd = new Object();
 
@@ -89,6 +94,39 @@ public final class FeedContentTrackerTest {
         assertTrue(snapshot.hasVideo);
         assertTrue(snapshot.isAd);
         assertTrue(snapshot.hasRawAd);
+        assertEquals(1, snapshot.playUrls.size());
+        assertEquals("play_addr", snapshot.playUrls.get(0).source);
+    }
+
+    @Test
+    public void advertisementPlaceholderVideoWaitsForRenderWatchdog()
+            throws Exception {
+        FakeAweme aweme = videoAweme(140);
+        aweme.isAd = true;
+        aweme.rawAd = new Object();
+
+        FeedContentTracker.Snapshot snapshot = snapshot(aweme);
+
+        assertTrue(snapshot.hasVideo);
+        assertTrue(snapshot.playUrls.isEmpty());
+        assertFalse(snapshot.shouldFilter());
+        assertFalse(snapshot.shouldFilterVisibleAdMarker());
+    }
+
+    @Test
+    public void nonHttpAdvertisementPlaybackUrlWaitsForRenderWatchdog()
+            throws Exception {
+        FakeAweme aweme = videoAweme(0);
+        aweme.video = new FakeVideo(
+                List.of("ftp://example.invalid/video.mp4")
+        );
+        aweme.isAd = true;
+
+        FeedContentTracker.Snapshot snapshot = snapshot(aweme);
+
+        assertTrue(snapshot.playUrls.isEmpty());
+        assertFalse(snapshot.shouldFilter());
+        assertFalse(snapshot.shouldFilterVisibleAdMarker());
     }
 
     @Test
@@ -161,6 +199,27 @@ public final class FeedContentTrackerTest {
 
         public Object getAwemeRawAd() {
             return rawAd;
+        }
+    }
+
+    public static final class FakeVideo {
+        @SerializedName("play_addr")
+        public final FakeUrlModel playAddress;
+
+        FakeVideo(List<String> urls) {
+            playAddress = new FakeUrlModel(urls);
+        }
+    }
+
+    public static final class FakeUrlModel {
+        private final List<String> urls;
+
+        FakeUrlModel(List<String> urls) {
+            this.urls = urls;
+        }
+
+        public List<String> getUrlList() {
+            return urls;
         }
     }
 }

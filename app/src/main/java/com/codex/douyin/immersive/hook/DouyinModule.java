@@ -77,11 +77,11 @@ public final class DouyinModule extends XposedModule {
                 .setId("douyin-immersive-activity-touch")
                 .setExceptionMode(ExceptionMode.PROTECTIVE)
                 .intercept(chain -> {
+                    Activity activity = (Activity) chain.getThisObject();
+                    MotionEvent event = (MotionEvent) chain.getArgs().get(0);
+                    ImmersiveUi.beforeActivityTouch(activity, event);
                     Object result = chain.proceed();
-                    ImmersiveUi.onActivityTouch(
-                            (Activity) chain.getThisObject(),
-                            (MotionEvent) chain.getArgs().get(0)
-                    );
+                    ImmersiveUi.onActivityTouch(activity, event);
                     return result;
                 });
     }

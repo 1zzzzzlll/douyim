@@ -59,4 +59,63 @@ public final class PlaybackStateTest {
                 900L
         ));
     }
+
+    @Test
+    public void contentChangeRequiresTwoDifferentKnownAids() {
+        assertTrue(PlaybackState.isDifferentKnownContent(
+                "paused-aid",
+                "next-aid"
+        ));
+        assertFalse(PlaybackState.isDifferentKnownContent(
+                "paused-aid",
+                "paused-aid"
+        ));
+        assertFalse(PlaybackState.isDifferentKnownContent(
+                null,
+                "next-aid"
+        ));
+        assertFalse(PlaybackState.isDifferentKnownContent(
+                "paused-aid",
+                null
+        ));
+        assertFalse(PlaybackState.isDifferentKnownContent(
+                "unknown",
+                "next-aid"
+        ));
+    }
+
+    @Test
+    public void pendingSwitchCandidateMustBeRecentPlayingAndDifferent() {
+        Object pausedPlayer = new Object();
+        Object nextPlayer = new Object();
+
+        assertTrue(PlaybackState.isRecentSwitchCandidate(
+                nextPlayer,
+                pausedPlayer,
+                1,
+                1_000L,
+                1_900L
+        ));
+        assertFalse(PlaybackState.isRecentSwitchCandidate(
+                pausedPlayer,
+                pausedPlayer,
+                1,
+                1_000L,
+                1_900L
+        ));
+        assertFalse(PlaybackState.isRecentSwitchCandidate(
+                nextPlayer,
+                pausedPlayer,
+                2,
+                1_000L,
+                1_900L
+        ));
+        assertFalse(PlaybackState.isRecentSwitchCandidate(
+                nextPlayer,
+                pausedPlayer,
+                1,
+                1_000L,
+                2_001L
+        ));
+    }
 }
