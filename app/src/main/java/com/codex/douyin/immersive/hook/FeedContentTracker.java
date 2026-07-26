@@ -207,7 +207,9 @@ final class FeedContentTracker {
                         || imageInfoCount > 0;
 
         String reason = null;
-        if (ad || rawAd != null) {
+        // Sponsored entries can still be ordinary playable videos. Only use the
+        // ad model as a filter when the host exposes no video for the entry.
+        if ((ad || rawAd != null) && video == null) {
             reason = "advertisement model";
         } else if (awemeType == 0xA3) {
             reason = "long article model";
@@ -440,6 +442,10 @@ final class FeedContentTracker {
 
         boolean shouldFilter() {
             return filterReason != null;
+        }
+
+        boolean shouldFilterVisibleAdMarker() {
+            return !hasVideo;
         }
 
         boolean hasDownloadUrl() {

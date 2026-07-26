@@ -76,6 +76,48 @@ public final class FeedContentTrackerTest {
         assertTrue(snapshot.hasVideo);
     }
 
+    @Test
+    public void videoAdvertisementRemainsPlayable() throws Exception {
+        FakeAweme aweme = videoAweme(0);
+        aweme.isAd = true;
+        aweme.rawAd = new Object();
+
+        FeedContentTracker.Snapshot snapshot = snapshot(aweme);
+
+        assertFalse(snapshot.shouldFilter());
+        assertFalse(snapshot.shouldFilterVisibleAdMarker());
+        assertTrue(snapshot.hasVideo);
+        assertTrue(snapshot.isAd);
+        assertTrue(snapshot.hasRawAd);
+    }
+
+    @Test
+    public void nonVideoAdvertisementIsFiltered() throws Exception {
+        FakeAweme aweme = videoAweme(0);
+        aweme.video = null;
+        aweme.isAd = true;
+        aweme.rawAd = new Object();
+
+        FeedContentTracker.Snapshot snapshot = snapshot(aweme);
+
+        assertTrue(snapshot.shouldFilter());
+        assertTrue(snapshot.shouldFilterVisibleAdMarker());
+        assertEquals("advertisement model", snapshot.filterReason);
+    }
+
+    @Test
+    public void photoAdvertisementWithPlaceholderVideoRemainsFiltered()
+            throws Exception {
+        FakeAweme aweme = videoAweme(2);
+        aweme.isAd = true;
+        aweme.rawAd = new Object();
+
+        FeedContentTracker.Snapshot snapshot = snapshot(aweme);
+
+        assertTrue(snapshot.shouldFilter());
+        assertEquals("photo article model", snapshot.filterReason);
+    }
+
     private static FakeAweme videoAweme(int awemeType) {
         FakeAweme aweme = new FakeAweme();
         aweme.aid = "test-" + awemeType;

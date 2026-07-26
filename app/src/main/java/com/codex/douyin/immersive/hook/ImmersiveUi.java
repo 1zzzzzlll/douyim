@@ -1163,7 +1163,8 @@ final class ImmersiveUi {
         if (model != null) {
             String reason = model.shouldFilter()
                     ? model.filterReason
-                    : containsVisibleAdMarker(decor)
+                    : model.shouldFilterVisibleAdMarker()
+                    && containsVisibleAdMarker(decor)
                     ? "advertisement marker"
                     : null;
             if (reason != null) {
@@ -1190,16 +1191,6 @@ final class ImmersiveUi {
             return false;
         }
 
-        if (containsVisibleAdMarker(decor)) {
-            if (!activelyArmed) {
-                contentCheckNotBefore = 0L;
-                contentCheckUntil = now + 2_500L;
-            }
-            if (confirmFilterCandidate("unknown", "advertisement marker", now)) {
-                filterCurrentItem(decor, "advertisement marker");
-            }
-            return true;
-        }
         if (!candidatePending) {
             resetFilterCandidate();
         }
