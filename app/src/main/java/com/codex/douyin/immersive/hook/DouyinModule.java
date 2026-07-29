@@ -2,6 +2,7 @@ package com.codex.douyin.immersive.hook;
 
 import android.app.Activity;
 import android.app.Instrumentation;
+import android.content.SharedPreferences;
 import android.util.Log;
 import android.view.MotionEvent;
 
@@ -46,7 +47,16 @@ public final class DouyinModule extends XposedModule {
         );
         installSubsystem(
                 "feed content tracker",
-                () -> FeedContentTracker.install(this, param.getClassLoader())
+                () -> {
+                    SharedPreferences preferences = getRemotePreferences(
+                            com.codex.douyin.immersive.FilterPreferences.NAME
+                    );
+                    FeedContentTracker.install(
+                            this,
+                            param.getClassLoader(),
+                            preferences
+                    );
+                }
         );
         installSubsystem(
                 "player tracker",

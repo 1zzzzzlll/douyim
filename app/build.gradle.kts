@@ -8,14 +8,14 @@ layout.buildDirectory.set(
 
 android {
     namespace = "com.codex.douyin.immersive"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.codex.douyin.immersive"
         minSdk = 28
         targetSdk = 35
-        versionCode = 10
-        versionName = "1.3.6"
+        versionCode = 11
+        versionName = "1.4.0"
     }
 
     buildTypes {
@@ -54,6 +54,7 @@ android {
 
 dependencies {
     compileOnly(libs.libxposed.api)
+    implementation(libs.libxposed.service)
     testImplementation(libs.libxposed.api)
     testImplementation("junit:junit:4.13.2")
 }

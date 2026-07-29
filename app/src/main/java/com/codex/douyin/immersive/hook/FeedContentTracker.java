@@ -1,9 +1,12 @@
 package com.codex.douyin.immersive.hook;
 
+import android.content.SharedPreferences;
 import android.graphics.Rect;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
+
+import com.codex.douyin.immersive.FilterPreferences;
 
 import java.lang.annotation.Annotation;
 import java.lang.ref.WeakReference;
@@ -31,12 +34,23 @@ final class FeedContentTracker {
     private static Method getCurrentAweme;
     private static Field viewPagerField;
     private static WeakReference<Object> selectedPanel = new WeakReference<>(null);
+    private static volatile FilterPreferences.Values filterSettings =
+            FilterPreferences.defaults();
+    private static SharedPreferences filterPreferences;
+    private static final SharedPreferences.OnSharedPreferenceChangeListener
+            FILTER_PREFERENCE_LISTENER =
+            (preferences, key) -> filterSettings = FilterPreferences.read(preferences);
 
     private FeedContentTracker() {
     }
 
-    static void install(DouyinModule module, ClassLoader loader)
+    static void install(
+            DouyinModule module,
+            ClassLoader loader,
+            SharedPreferences preferences
+    )
             throws ReflectiveOperationException {
+        configurePreferences(preferences);
         panelClass = Class.forName(
                 "com.ss.android.ugc.aweme.feed.panel.BaseListFragmentPanel",
                 false,
@@ -74,6 +88,27 @@ final class FeedContentTracker {
                     "feed page-selection hook unavailable; using visible-panel fallback");
         }
         module.log(Log.INFO, DouyinModule.TAG, "current feed model hook installed");
+    }
+
+    private static synchronized void configurePreferences(
+            SharedPreferences preferences
+    ) {
+        if (filterPreferences != null && filterPreferences != preferences) {
+            try {
+                filterPreferences.unregisterOnSharedPreferenceChangeListener(
+                        FILTER_PREFERENCE_LISTENER
+                );
+            } catch (RuntimeException ignored) {
+                // A dead framework binder will be replaced by the new preference proxy.
+            }
+        }
+        filterPreferences = preferences;
+        filterSettings = FilterPreferences.read(preferences);
+        if (preferences != null) {
+            preferences.registerOnSharedPreferenceChangeListener(
+                    FILTER_PREFERENCE_LISTENER
+            );
+        }
     }
 
     static Snapshot current(View decor) {
@@ -142,7 +177,7 @@ final class FeedContentTracker {
                 Log.d(DouyinModule.TAG, "current feed model lookup failed", error);
             }
         }
-        return bestAweme == null ? null : snapshot(bestAweme);
+        return bestAweme == null ? null : snapshot(bestAweme, filterSettings);
     }
 
     private static boolean isEffectivelyVisible(View view, View decor) {
@@ -169,11 +204,20 @@ final class FeedContentTracker {
     }
 
     private static Snapshot snapshot(Object aweme) {
+        return snapshot(aweme, filterSettings);
+    }
+
+    static Snapshot snapshot(
+            Object aweme,
+            FilterPreferences.Values settings
+    ) {
         Class<?> type = aweme.getClass();
         String aid = stringValue(readField(type, aweme, "aid"));
         int awemeType = intValue(readField(type, aweme, "awemeType"), -1);
         boolean ad = booleanValue(readField(type, aweme, "isAd"));
         Object rawAd = invokeNoArg(type, aweme, "getAwemeRawAd");
+        boolean live = booleanValue(invokeNoArg(type, aweme, "isLive"))
+                || awemeType == 101;
         boolean hostImage = booleanValue(invokeNoArg(type, aweme, "isImage"));
         boolean hostMultiImage =
                 booleanValue(invokeNoArg(type, aweme, "isMultiImage"));
@@ -197,6 +241,18 @@ final class FeedContentTracker {
         int imageCount = collectionSize(images);
         int imageInfoCount = collectionSize(imageInfos);
         List<PlayUrl> playUrls = resolvePlayUrls(video);
+        String title = firstNonBlank(
+                textValue(readField(type, aweme, "itemTitle")),
+                textValue(readSerializedField(aweme, "item_title")),
+                textValue(readField(type, aweme, "title")),
+                textValue(readSerializedField(aweme, "title"))
+        );
+        String description = firstNonBlank(
+                textValue(readField(type, aweme, "desc")),
+                textValue(readSerializedField(aweme, "desc")),
+                textValue(invokeNoArg(type, aweme, "getProcessedDesc")),
+                textValue(invokeNoArg(type, aweme, "getEllipsizeDesc"))
+        );
         boolean photo =
                 hostImage
                         || hostMultiImage
@@ -206,19 +262,39 @@ final class FeedContentTracker {
                         || imageCount > 0
                         || imageInfoCount > 0;
         boolean advertisement = ad || rawAd != null;
+        FilterPreferences.Values activeSettings =
+                settings == null ? FilterPreferences.defaults() : settings;
 
         String reason = null;
         if (advertisement) {
-            reason = "advertisement model";
-        } else if (awemeType == 0xA3) {
-            reason = "long article model";
-        } else if (photo) {
-            reason = "photo article model";
-        } else if (video == null) {
-            if (article != null) {
-                reason = "article model";
-            } else {
-                reason = "non-video model";
+            if (activeSettings.skipAds) {
+                reason = "advertisement model";
+            }
+        } else if (live) {
+            if (activeSettings.skipLives) {
+                reason = "live model";
+            }
+        } else if (photo || awemeType == 0xA3 || video == null) {
+            if (activeSettings.skipImages) {
+                if (awemeType == 0xA3) {
+                    reason = "long article model";
+                } else if (photo) {
+                    reason = "photo article model";
+                } else if (article != null) {
+                    reason = "article model";
+                } else {
+                    reason = "non-video model";
+                }
+            }
+        } else {
+            String keyword = activeSettings.matchingVideoKeyword(
+                    title,
+                    description
+            );
+            if (activeSettings.skipVideos) {
+                reason = "video type setting";
+            } else if (keyword != null) {
+                reason = "video keyword: " + keyword;
             }
         }
         return new Snapshot(
@@ -230,9 +306,12 @@ final class FeedContentTracker {
                 article != null,
                 imageCount,
                 imageInfoCount,
+                live,
                 hostImage,
                 hostMultiImage,
                 slides,
+                title,
+                description,
                 reason,
                 playUrls
         );
@@ -394,6 +473,19 @@ final class FeedContentTracker {
         return value == null ? "unknown" : value.toString();
     }
 
+    private static String textValue(Object value) {
+        return value instanceof CharSequence text ? text.toString().trim() : "";
+    }
+
+    private static String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isEmpty()) {
+                return value;
+            }
+        }
+        return "";
+    }
+
     static final class Snapshot {
         final String aid;
         final int awemeType;
@@ -403,9 +495,12 @@ final class FeedContentTracker {
         final boolean hasArticle;
         final int imageCount;
         final int imageInfoCount;
+        final boolean live;
         final boolean hostImage;
         final boolean hostMultiImage;
         final boolean slides;
+        final String title;
+        final String description;
         final String filterReason;
         final List<PlayUrl> playUrls;
 
@@ -418,9 +513,12 @@ final class FeedContentTracker {
                 boolean hasArticle,
                 int imageCount,
                 int imageInfoCount,
+                boolean live,
                 boolean hostImage,
                 boolean hostMultiImage,
                 boolean slides,
+                String title,
+                String description,
                 String filterReason,
                 List<PlayUrl> playUrls
         ) {
@@ -432,9 +530,12 @@ final class FeedContentTracker {
             this.hasArticle = hasArticle;
             this.imageCount = imageCount;
             this.imageInfoCount = imageInfoCount;
+            this.live = live;
             this.hostImage = hostImage;
             this.hostMultiImage = hostMultiImage;
             this.slides = slides;
+            this.title = title;
+            this.description = description;
             this.filterReason = filterReason;
             this.playUrls = playUrls;
         }
@@ -460,9 +561,12 @@ final class FeedContentTracker {
                     + " article=" + hasArticle
                     + " images=" + imageCount
                     + " imageInfos=" + imageInfoCount
+                    + " live=" + live
                     + " hostImage=" + hostImage
                     + " hostMultiImage=" + hostMultiImage
                     + " slides=" + slides
+                    + " titleChars=" + title.length()
+                    + " descChars=" + description.length()
                     + " playUrls=" + playUrls.size();
         }
     }

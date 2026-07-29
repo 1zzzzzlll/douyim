@@ -5,6 +5,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import com.google.gson.annotations.SerializedName;
+import com.codex.douyin.immersive.FilterPreferences;
 
 import org.junit.Test;
 
@@ -155,6 +156,111 @@ public final class FeedContentTrackerTest {
         assertEquals("advertisement model", snapshot.filterReason);
     }
 
+    @Test
+    public void disabledTypeSettingsKeepEveryCategory() {
+        FilterPreferences.Values disabled =
+                new FilterPreferences.Values(false, false, false, false, "");
+
+        FakeAweme ad = videoAweme(0);
+        ad.isAd = true;
+        assertFalse(snapshot(ad, disabled).shouldFilter());
+
+        FakeAweme image = videoAweme(2);
+        assertFalse(snapshot(image, disabled).shouldFilter());
+
+        FakeAweme live = videoAweme(101);
+        assertFalse(snapshot(live, disabled).shouldFilter());
+    }
+
+    @Test
+    public void liveSettingFiltersTypeOneHundredOne() {
+        FakeAweme live = videoAweme(101);
+
+        FeedContentTracker.Snapshot snapshot = snapshot(
+                live,
+                new FilterPreferences.Values(false, false, true, false, "")
+        );
+
+        assertTrue(snapshot.live);
+        assertTrue(snapshot.shouldFilter());
+        assertEquals("live model", snapshot.filterReason);
+    }
+
+    @Test
+    public void videoSettingFiltersOrdinaryVideo() {
+        FakeAweme aweme = videoAweme(0);
+
+        FeedContentTracker.Snapshot snapshot = snapshot(
+                aweme,
+                new FilterPreferences.Values(false, false, false, true, "")
+        );
+
+        assertTrue(snapshot.shouldFilter());
+        assertEquals("video type setting", snapshot.filterReason);
+    }
+
+    @Test
+    public void keywordMatchesVideoItemTitle() {
+        FakeAweme aweme = videoAweme(0);
+        aweme.itemTitle = "今天一起玩超级游戏";
+
+        FeedContentTracker.Snapshot snapshot = snapshot(
+                aweme,
+                new FilterPreferences.Values(
+                        false,
+                        false,
+                        false,
+                        false,
+                        "推广\n游戏"
+                )
+        );
+
+        assertTrue(snapshot.shouldFilter());
+        assertEquals("video keyword: 游戏", snapshot.filterReason);
+        assertEquals(aweme.itemTitle, snapshot.title);
+    }
+
+    @Test
+    public void keywordMatchesVideoDescriptionIgnoringEnglishCase() {
+        FakeAweme aweme = videoAweme(0);
+        aweme.desc = "A closer look at the New Gadget today";
+
+        FeedContentTracker.Snapshot snapshot = snapshot(
+                aweme,
+                new FilterPreferences.Values(
+                        false,
+                        false,
+                        false,
+                        false,
+                        "GADGET，其他"
+                )
+        );
+
+        assertTrue(snapshot.shouldFilter());
+        assertEquals("video keyword: GADGET", snapshot.filterReason);
+        assertEquals(aweme.desc, snapshot.description);
+    }
+
+    @Test
+    public void videoKeywordsDoNotOverrideDisabledAdvertisementType() {
+        FakeAweme aweme = videoAweme(0);
+        aweme.isAd = true;
+        aweme.desc = "游戏推广";
+
+        FeedContentTracker.Snapshot snapshot = snapshot(
+                aweme,
+                new FilterPreferences.Values(
+                        false,
+                        false,
+                        false,
+                        false,
+                        "游戏"
+                )
+        );
+
+        assertFalse(snapshot.shouldFilter());
+    }
+
     private static FakeAweme videoAweme(int awemeType) {
         FakeAweme aweme = new FakeAweme();
         aweme.aid = "test-" + awemeType;
@@ -175,11 +281,21 @@ public final class FeedContentTrackerTest {
         return (FeedContentTracker.Snapshot) method.invoke(null, aweme);
     }
 
+    private static FeedContentTracker.Snapshot snapshot(
+            Object aweme,
+            FilterPreferences.Values settings
+    ) {
+        return FeedContentTracker.snapshot(aweme, settings);
+    }
+
     public static final class FakeAweme {
         public String aid;
         public int awemeType;
         public boolean isAd;
         public boolean isSlides;
+        public String itemTitle;
+        public String title;
+        public String desc;
         public Object video;
         public Object articleInfo;
         public List<Object> images;
