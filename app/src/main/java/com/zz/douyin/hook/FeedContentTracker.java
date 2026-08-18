@@ -1,4 +1,4 @@
-package com.codex.douyin.immersive.hook;
+package com.zz.douyin.hook;
 
 import android.content.SharedPreferences;
 import android.graphics.Rect;
@@ -6,7 +6,7 @@ import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
 
-import com.codex.douyin.immersive.FilterPreferences;
+import com.zz.douyin.FilterPreferences;
 
 import java.lang.annotation.Annotation;
 import java.lang.ref.WeakReference;

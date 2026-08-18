@@ -3,5 +3,4 @@
     public <init>();
 }
 
--keepclassmembers class com.codex.douyin.immersive.hook.** { *; }
-
+-keepclassmembers class com.zz.douyin.hook.** { *; }

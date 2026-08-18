@@ -1,4 +1,4 @@
-package com.codex.douyin.immersive.hook;
+package com.zz.douyin.hook;
 
 import android.app.Activity;
 import android.app.Instrumentation;
@@ -49,7 +49,7 @@ public final class DouyinModule extends XposedModule {
                 "feed content tracker",
                 () -> {
                     SharedPreferences preferences = getRemotePreferences(
-                            com.codex.douyin.immersive.FilterPreferences.NAME
+                            com.zz.douyin.FilterPreferences.NAME
                     );
                     FeedContentTracker.install(
                             this,

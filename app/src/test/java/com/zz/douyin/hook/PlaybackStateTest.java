@@ -1,4 +1,4 @@
-package com.codex.douyin.immersive.hook;
+package com.zz.douyin.hook;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;

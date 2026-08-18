@@ -24,7 +24,8 @@
 | 已验证抖音版本 | 39.7.0（versionCode 390701） |
 | Android | 9（API 28）及以上 |
 | 默认作用域 | `com.ss.android.ugc.aweme` |
-| 模块版本 | 1.4.0 |
+| 模块包名 | `com.zz.douyin` |
+| 模块版本 | 1.4.1 |
 
 模块针对抖音 39.7.0 的运行时结构进行适配。抖音升级后，播放器类、数据模型或界面层级可能变化，
 届时需要重新适配。
@@ -32,15 +33,18 @@
 ## 安装
 
 1. 从 [`dist`](dist) 目录下载最新版
-   [`douxianren-lsp-api102-v1.4.0.apk`](dist/douxianren-lsp-api102-v1.4.0.apk)。
+   [`douxianren-lsp-api102-v1.4.1.apk`](dist/douxianren-lsp-api102-v1.4.1.apk)。
 2. 在手机上安装 APK。
 3. 在 LSPosed 中启用“抖仙人”模块。
 4. 保持默认作用域“抖音”，然后强制停止并重新打开抖音。
 
+从 1.4.1 起模块包名调整为 `com.zz.douyin`。它会作为新应用与旧包名版本并存，升级后请在
+LSPosed 中重新启用新包名模块并确认作用域。
+
 最新版 APK 的 SHA-256：
 
 ```text
-04C3D88409EED3417CA76956706B35A212911E05038A09BE66CA698A51B568D5
+F85967ACC03C557A45B307AF7ABF6DB0DEC913F318A6B84B09263A201EB53605
 ```
 
 ## 使用方式
@@ -94,7 +98,7 @@ Gradle 中间产物会写入系统临时目录下的 `douyin-immersive-gradle/ap
 ## 项目结构
 
 ```text
-app/src/main/java/com/codex/douyin/immersive/
+app/src/main/java/com/zz/douyin/
 ├── FilterPreferences.java
 ├── MainActivity.java
 ├── ModuleApplication.java

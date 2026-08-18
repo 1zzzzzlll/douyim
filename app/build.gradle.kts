@@ -7,15 +7,15 @@ layout.buildDirectory.set(
 )
 
 android {
-    namespace = "com.codex.douyin.immersive"
+    namespace = "com.zz.douyin"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.codex.douyin.immersive"
+        applicationId = "com.zz.douyin"
         minSdk = 28
         targetSdk = 35
-        versionCode = 11
-        versionName = "1.4.0"
+        versionCode = 12
+        versionName = "1.4.1"
     }
 
     buildTypes {

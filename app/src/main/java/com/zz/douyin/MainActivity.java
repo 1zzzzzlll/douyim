@@ -1,4 +1,4 @@
-package com.codex.douyin.immersive;
+package com.zz.douyin;
 
 import android.app.Activity;
 import android.content.SharedPreferences;

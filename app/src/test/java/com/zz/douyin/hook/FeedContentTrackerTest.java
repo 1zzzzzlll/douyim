@@ -1,11 +1,11 @@
-package com.codex.douyin.immersive.hook;
+package com.zz.douyin.hook;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import com.google.gson.annotations.SerializedName;
-import com.codex.douyin.immersive.FilterPreferences;
+import com.zz.douyin.FilterPreferences;
 
 import org.junit.Test;
 

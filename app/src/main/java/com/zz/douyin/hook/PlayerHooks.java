@@ -1,4 +1,4 @@
-package com.codex.douyin.immersive.hook;
+package com.zz.douyin.hook;
 
 import android.util.Log;
 
