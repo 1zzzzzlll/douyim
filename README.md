@@ -88,8 +88,8 @@ Gradle 中间产物会写入系统临时目录下的 `douyin-immersive-gradle/ap
 
 ## 交流与支持
 
-- Telegram 机器人：[@DDxianren_bot](https://t.me/DDxianren_bot)
-- Telegram 交流群：[加入抖仙人交流群](https://t.me/+Owih82lTnaVmNzFl)
+- Telegram 机器人：[联系机器人使用QW/DD仙人](https://t.me/DDxianren_bot)
+- Telegram 交流群：[加入抖仙人交流群](https://t.me/+h0a6WUhfbj84ZTM9)
 
 ## 项目结构
 
