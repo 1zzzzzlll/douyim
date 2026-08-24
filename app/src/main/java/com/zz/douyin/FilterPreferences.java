@@ -16,11 +16,13 @@ public final class FilterPreferences {
     public static final String KEY_SKIP_LIVES = "skip_lives";
     public static final String KEY_SKIP_VIDEOS = "skip_videos";
     public static final String KEY_VIDEO_KEYWORDS = "video_keywords";
+    public static final String KEY_SHOW_DANMAKU = "show_danmaku";
 
     public static final boolean DEFAULT_SKIP_ADS = true;
     public static final boolean DEFAULT_SKIP_IMAGES = true;
     public static final boolean DEFAULT_SKIP_LIVES = true;
     public static final boolean DEFAULT_SKIP_VIDEOS = false;
+    public static final boolean DEFAULT_SHOW_DANMAKU = false;
 
     private FilterPreferences() {
     }
@@ -46,6 +48,12 @@ public final class FilterPreferences {
                 preferences.getBoolean(KEY_SKIP_VIDEOS, DEFAULT_SKIP_VIDEOS),
                 preferences.getString(KEY_VIDEO_KEYWORDS, "")
         );
+    }
+
+    public static boolean readShowDanmaku(SharedPreferences preferences) {
+        return preferences == null
+                ? DEFAULT_SHOW_DANMAKU
+                : preferences.getBoolean(KEY_SHOW_DANMAKU, DEFAULT_SHOW_DANMAKU);
     }
 
     public static final class Values {

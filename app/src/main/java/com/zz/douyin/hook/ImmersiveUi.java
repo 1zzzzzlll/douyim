@@ -1,6 +1,7 @@
 package com.zz.douyin.hook;
 
 import android.app.Activity;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
@@ -15,6 +16,7 @@ import android.view.SurfaceView;
 import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
@@ -32,12 +34,28 @@ final class ImmersiveUi {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final long SCAN_INTERVAL_MS = 100L;
     private static final long FALLBACK_CONTENT_CHECK_INTERVAL_MS = 900L;
+    private static final long UI_TRANSITION_HOLD_MS = 3_000L;
     private static final Map<View, SavedView> HIDDEN =
             Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<View, Integer> ROOT_SYSTEM_UI =
             Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<View, ViewGroup.LayoutParams> EXPANDED_VIEWPORTS =
             Collections.synchronizedMap(new WeakHashMap<>());
+    private static final ViewTreeObserver.OnPreDrawListener HIDDEN_VIEW_GUARD =
+            () -> {
+                reassertHiddenViews();
+                return true;
+            };
+    private static WeakReference<View> hiddenGuardRoot = new WeakReference<>(null);
+    private static volatile boolean showDanmaku;
+    private static SharedPreferences immersivePreferences;
+    private static final SharedPreferences.OnSharedPreferenceChangeListener
+            PREFERENCE_LISTENER = (preferences, key) -> {
+                if (com.zz.douyin.FilterPreferences.KEY_SHOW_DANMAKU.equals(key)) {
+                    showDanmaku = com.zz.douyin.FilterPreferences
+                            .readShowDanmaku(preferences);
+                }
+            };
 
     private static WeakReference<Activity> active = new WeakReference<>(null);
     private static WeakReference<View> activeRoot = new WeakReference<>(null);
@@ -75,13 +93,32 @@ final class ImmersiveUi {
     private ImmersiveUi() {
     }
 
+    static synchronized void configurePreferences(SharedPreferences preferences) {
+        if (immersivePreferences != null && immersivePreferences != preferences) {
+            try {
+                immersivePreferences.unregisterOnSharedPreferenceChangeListener(
+                        PREFERENCE_LISTENER
+                );
+            } catch (RuntimeException ignored) {
+                // A dead remote preference bridge will be replaced below.
+            }
+        }
+        immersivePreferences = preferences;
+        showDanmaku = com.zz.douyin.FilterPreferences.readShowDanmaku(preferences);
+        if (preferences != null) {
+            preferences.registerOnSharedPreferenceChangeListener(PREFERENCE_LISTENER);
+        }
+    }
+
     static void onActivityResumed(Activity activity) {
         if (activity == null) {
             return;
         }
         MAIN.post(() -> {
             active = new WeakReference<>(activity);
-            activeRoot = new WeakReference<>(activity.getWindow().getDecorView());
+            View decor = activity.getWindow().getDecorView();
+            activeRoot = new WeakReference<>(decor);
+            attachHiddenViewGuard(decor);
             Log.i(DouyinModule.TAG, "activity resumed: " + activity.getClass().getName());
             armContentFilter(1_000L);
             scheduleScan(120L);
@@ -104,7 +141,7 @@ final class ImmersiveUi {
     static void onFeedPageSelected() {
         PlaybackState.beginAutoSwitch();
         MAIN.post(() -> {
-            transitionBoostUntil = SystemClock.uptimeMillis() + 1_200L;
+            boostTransitionWindow();
             armContentFilter(120L);
             scheduleScan(0L);
         });
@@ -127,6 +164,7 @@ final class ImmersiveUi {
                 && Math.abs(dy) > 72f * density
                 && Math.abs(dy) > Math.abs(dx)) {
             PlaybackState.beginAutoSwitch();
+            boostTransitionWindow();
         }
     }
 
@@ -185,6 +223,7 @@ final class ImmersiveUi {
         if (decor != null
                 && Math.abs(dy) > 72f * density
                 && Math.abs(dy) > Math.abs(dx)) {
+            boostTransitionWindow();
             armContentFilter(700L);
             confirmUserFeedSwitch(
                     touchGestureToken,
@@ -338,7 +377,7 @@ final class ImmersiveUi {
     static void onPlaybackChanged(boolean playing) {
         MAIN.post(() -> {
             if (playing) {
-                transitionBoostUntil = SystemClock.uptimeMillis() + 1_200L;
+                boostTransitionWindow();
             }
             Activity activity = activeActivity();
             View decor = activeDecor(activity);
@@ -450,11 +489,25 @@ final class ImmersiveUi {
         if (!videos.isEmpty()) {
             videoMissingLogged = false;
             expandVideoViewport(decor, videos);
-            restoreVideoPaths(videos);
-            hideOutsideVideoPaths(decor, videos);
+            List<View> preservedViews = new ArrayList<>(videos);
+            if (showDanmaku) {
+                collectVisibleDanmakuViews(decor, videos, preservedViews);
+            }
+            restorePreservedPaths(preservedViews);
+            hideOutsidePreservedPaths(decor, preservedViews);
             hideSystemBars(activity, decor);
         } else {
-            restoreAll(activity, decor);
+            long now = SystemClock.uptimeMillis();
+            if (ImmersiveTransitionPolicy.shouldHoldHiddenUi(
+                    hasHiddenViews(),
+                    now,
+                    transitionBoostUntil
+            )) {
+                reassertHiddenViews();
+                hideSystemBars(activity, decor);
+            } else {
+                restoreAll(activity, decor);
+            }
             if (!videoMissingLogged) {
                 videoMissingLogged = true;
                 Log.w(DouyinModule.TAG,
@@ -469,6 +522,13 @@ final class ImmersiveUi {
                 ? 16L
                 : SCAN_INTERVAL_MS;
         scheduleScan(delay);
+    }
+
+    private static void boostTransitionWindow() {
+        transitionBoostUntil = Math.max(
+                transitionBoostUntil,
+                SystemClock.uptimeMillis() + UI_TRANSITION_HOLD_MS
+        );
     }
 
     private static Activity activeActivity() {
@@ -984,18 +1044,54 @@ final class ImmersiveUi {
                 || name.endsWith("textureview");
     }
 
-    private static void hideOutsideVideoPaths(View node, List<View> videos) {
-        if (videos.contains(node)) {
+    private static void collectVisibleDanmakuViews(
+            View node,
+            List<View> videos,
+            List<View> out
+    ) {
+        if (DanmakuViewClassifier.isRenderView(node.getClass().getName())
+                && node.isAttachedToWindow()
+                && node.getVisibility() == View.VISIBLE
+                && overlapsAnyVideo(node, videos)
+                && !out.contains(node)) {
+            out.add(node);
+        }
+        if (node instanceof ViewGroup group) {
+            for (int i = 0; i < group.getChildCount(); i++) {
+                collectVisibleDanmakuViews(group.getChildAt(i), videos, out);
+            }
+        }
+    }
+
+    private static boolean overlapsAnyVideo(View candidate, List<View> videos) {
+        Rect candidateRect = new Rect();
+        if (!candidate.getGlobalVisibleRect(candidateRect) || candidateRect.isEmpty()) {
+            return false;
+        }
+        Rect videoRect = new Rect();
+        for (View video : videos) {
+            if (video.getGlobalVisibleRect(videoRect)
+                    && Rect.intersects(candidateRect, videoRect)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void hideOutsidePreservedPaths(View node, List<View> preservedViews) {
+        if (preservedViews.contains(node)) {
             return;
         }
-        if (!(node instanceof ViewGroup group) || !containsAny(group, videos)) {
+        if (!(node instanceof ViewGroup group)
+                || !containsAny(group, preservedViews)) {
             hide(node);
             return;
         }
         for (int i = 0; i < group.getChildCount(); i++) {
             View child = group.getChildAt(i);
-            if (videos.contains(child) || containsAny(child, videos)) {
-                hideOutsideVideoPaths(child, videos);
+            if (preservedViews.contains(child)
+                    || containsAny(child, preservedViews)) {
+                hideOutsidePreservedPaths(child, preservedViews);
             } else {
                 hide(child);
             }
@@ -1025,14 +1121,15 @@ final class ImmersiveUi {
         return false;
     }
 
-    private static void restoreVideoPaths(List<View> videos) {
+    private static void restorePreservedPaths(List<View> preservedViews) {
         synchronized (HIDDEN) {
             for (Map.Entry<View, SavedView> entry :
                     new ArrayList<>(HIDDEN.entrySet())) {
                 View view = entry.getKey();
                 SavedView saved = entry.getValue();
                 if (view == null || saved == null
-                        || (!videos.contains(view) && !containsAny(view, videos))) {
+                        || (!preservedViews.contains(view)
+                        && !containsAny(view, preservedViews))) {
                     continue;
                 }
                 view.setAlpha(saved.alpha);
@@ -1055,6 +1152,53 @@ final class ImmersiveUi {
         view.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
     }
 
+    private static boolean hasHiddenViews() {
+        synchronized (HIDDEN) {
+            return !HIDDEN.isEmpty();
+        }
+    }
+
+    private static void reassertHiddenViews() {
+        synchronized (HIDDEN) {
+            for (Map.Entry<View, SavedView> entry :
+                    new ArrayList<>(HIDDEN.entrySet())) {
+                View view = entry.getKey();
+                if (view != null && view.isAttachedToWindow()
+                        && view.getAlpha() != 0f) {
+                    view.setAlpha(0f);
+                }
+            }
+        }
+    }
+
+    private static void attachHiddenViewGuard(View root) {
+        View previous = hiddenGuardRoot.get();
+        if (previous == root) {
+            return;
+        }
+        detachHiddenViewGuard();
+        if (root == null) {
+            return;
+        }
+        ViewTreeObserver observer = root.getViewTreeObserver();
+        if (observer.isAlive()) {
+            observer.addOnPreDrawListener(HIDDEN_VIEW_GUARD);
+            hiddenGuardRoot = new WeakReference<>(root);
+        }
+    }
+
+    private static void detachHiddenViewGuard() {
+        View root = hiddenGuardRoot.get();
+        hiddenGuardRoot.clear();
+        if (root == null) {
+            return;
+        }
+        ViewTreeObserver observer = root.getViewTreeObserver();
+        if (observer.isAlive()) {
+            observer.removeOnPreDrawListener(HIDDEN_VIEW_GUARD);
+        }
+    }
+
     private static void restoreAll(Activity activity) {
         restoreAll(activity, activeDecor(activity), true);
     }
@@ -1069,6 +1213,7 @@ final class ImmersiveUi {
             boolean leavingActivity
     ) {
         if (leavingActivity) {
+            detachHiddenViewGuard();
             restoreExpandedViewports();
         }
         int restored = 0;

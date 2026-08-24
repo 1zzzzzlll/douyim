@@ -33,6 +33,7 @@ public final class MainActivity extends Activity
     private Switch skipImages;
     private Switch skipLives;
     private Switch skipVideos;
+    private Switch showDanmaku;
     private EditText keywordInput;
     private Button saveKeywords;
     private SharedPreferences preferences;
@@ -76,7 +77,7 @@ public final class MainActivity extends Activity
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         root.addView(title, matchWrap());
 
-        TextView subtitle = text("内容跳过设置", 15, PRIMARY);
+        TextView subtitle = text("播放与内容设置", 15, PRIMARY);
         LinearLayout.LayoutParams subtitleParams = matchWrap();
         subtitleParams.topMargin = dp(4);
         root.addView(subtitle, subtitleParams);
@@ -122,6 +123,22 @@ public final class MainActivity extends Activity
         LinearLayout.LayoutParams typeCardParams = matchWrap();
         typeCardParams.topMargin = dp(10);
         root.addView(typeCard, typeCardParams);
+
+        TextView playbackHeader = sectionTitle("播放设置");
+        LinearLayout.LayoutParams playbackHeaderParams = matchWrap();
+        playbackHeaderParams.topMargin = dp(28);
+        root.addView(playbackHeader, playbackHeaderParams);
+
+        LinearLayout playbackCard = card();
+        showDanmaku = addSwitch(
+                playbackCard,
+                "播放弹幕",
+                "纯净播放时保留抖音原生弹幕，其他界面仍保持隐藏",
+                FilterPreferences.KEY_SHOW_DANMAKU
+        );
+        LinearLayout.LayoutParams playbackCardParams = matchWrap();
+        playbackCardParams.topMargin = dp(10);
+        root.addView(playbackCard, playbackCardParams);
 
         TextView keywordHeader = sectionTitle("视频关键词");
         LinearLayout.LayoutParams keywordHeaderParams = matchWrap();
@@ -203,6 +220,7 @@ public final class MainActivity extends Activity
         skipImages.setChecked(values.skipImages);
         skipLives.setChecked(values.skipLives);
         skipVideos.setChecked(values.skipVideos);
+        showDanmaku.setChecked(FilterPreferences.readShowDanmaku(preferences));
         keywordInput.setText(values.keywordText);
         keywordInput.setSelection(keywordInput.length());
         serviceStatus.setText(
@@ -284,6 +302,7 @@ public final class MainActivity extends Activity
         skipImages.setEnabled(enabled);
         skipLives.setEnabled(enabled);
         skipVideos.setEnabled(enabled);
+        showDanmaku.setEnabled(enabled);
         keywordInput.setEnabled(enabled);
         saveKeywords.setEnabled(enabled);
         saveKeywords.setAlpha(enabled ? 1f : 0.45f);

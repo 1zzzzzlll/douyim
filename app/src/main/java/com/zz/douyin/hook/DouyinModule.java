@@ -51,6 +51,7 @@ public final class DouyinModule extends XposedModule {
                     SharedPreferences preferences = getRemotePreferences(
                             com.zz.douyin.FilterPreferences.NAME
                     );
+                    ImmersiveUi.configurePreferences(preferences);
                     FeedContentTracker.install(
                             this,
                             param.getClassLoader(),
