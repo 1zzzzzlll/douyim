@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 final class ImmersiveUi {
@@ -37,6 +38,8 @@ final class ImmersiveUi {
     private static final long UI_TRANSITION_HOLD_MS = 3_000L;
     private static final Map<View, SavedView> HIDDEN =
             Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Set<View> GESTURE_PATHS =
+            Collections.newSetFromMap(new WeakHashMap<>());
     private static final Map<View, Integer> ROOT_SYSTEM_UI =
             Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<View, ViewGroup.LayoutParams> EXPANDED_VIEWPORTS =
@@ -71,6 +74,7 @@ final class ImmersiveUi {
     private static long touchDownAt;
     private static long touchGestureToken;
     private static boolean touchInProgress;
+    private static boolean touchDownImmersive;
     private static String touchDownAid;
     private static String touchDownObservedAid;
     private static Object touchDownEngine;
@@ -78,7 +82,6 @@ final class ImmersiveUi {
     private static WeakReference<TextView> downloadButton =
             new WeakReference<>(null);
     private static long lastHandledTouchDownTime;
-    private static long lastHandledTouchUpAt;
     private static long contentCheckNotBefore;
     private static long contentCheckUntil;
     private static long lastContentCheckAt;
@@ -180,6 +183,7 @@ final class ImmersiveUi {
         }
         if (action == MotionEvent.ACTION_DOWN) {
             touchInProgress = true;
+            touchDownImmersive = hasHiddenViews() && !PlaybackState.isUserPaused();
             touchGestureToken++;
             touchDownX = event.getRawX();
             touchDownY = event.getRawY();
@@ -206,12 +210,7 @@ final class ImmersiveUi {
         if (gestureId == lastHandledTouchDownTime) {
             return;
         }
-        long now = SystemClock.uptimeMillis();
-        if (now - lastHandledTouchUpAt < 300L) {
-            return;
-        }
         lastHandledTouchDownTime = gestureId;
-        lastHandledTouchUpAt = now;
 
         float dx = event.getRawX() - touchDownX;
         float dy = event.getRawY() - touchDownY;
@@ -236,10 +235,10 @@ final class ImmersiveUi {
         if (decor == null
                 || dx * dx + dy * dy > 1_600f
                 || elapsed > 500L
-                || event.getRawX() < decor.getWidth() * 0.18f
+                || (!touchDownImmersive && (event.getRawX() < decor.getWidth() * 0.18f
                 || event.getRawX() > decor.getWidth() * 0.82f
                 || event.getRawY() < decor.getHeight() * 0.12f
-                || event.getRawY() > decor.getHeight() * 0.86f) {
+                || event.getRawY() > decor.getHeight() * 0.86f))) {
             return;
         }
 
@@ -495,6 +494,7 @@ final class ImmersiveUi {
             }
             restorePreservedPaths(preservedViews);
             hideOutsidePreservedPaths(decor, preservedViews);
+            updateGesturePaths(decor, videos);
             hideSystemBars(activity, decor);
         } else {
             long now = SystemClock.uptimeMillis();
@@ -1158,6 +1158,54 @@ final class ImmersiveUi {
         }
     }
 
+    private static void updateGesturePaths(View root, List<View> videos) {
+        GESTURE_PATHS.clear();
+        collectGesturePaths(root, root, videos);
+    }
+
+    private static void collectGesturePaths(View node, View root, List<View> videos) {
+        if (ImmersiveTouchPolicy.isGestureView(node.getClass().getName())
+                && node.isAttachedToWindow()
+                && node.getVisibility() == View.VISIBLE
+                && node.getWidth() >= root.getWidth() * 0.8f
+                && node.getHeight() >= root.getHeight() * 0.5f
+                && overlapsAnyVideo(node, videos)) {
+            // Keep only the gesture receiver and its ancestors touchable. A sibling button
+            // inside the same transparent container must still fail the hidden-ancestor check.
+            View path = node;
+            while (path != null) {
+                GESTURE_PATHS.add(path);
+                path = path.getParent() instanceof View parent ? parent : null;
+            }
+        }
+        if (node instanceof ViewGroup group) {
+            for (int i = 0; i < group.getChildCount(); i++) {
+                collectGesturePaths(group.getChildAt(i), root, videos);
+            }
+        }
+    }
+
+    static boolean isImmersiveGestureView(View view) {
+        return hasHiddenViews() && GESTURE_PATHS.contains(view)
+                && ImmersiveTouchPolicy.isGestureView(view.getClass().getName());
+    }
+
+    static boolean shouldBlockHiddenTouch(View view, boolean cancel) {
+        if (cancel || !hasHiddenViews()) {
+            return false;
+        }
+        boolean hidden = false;
+        View path = view;
+        while (path != null) {
+            if (HIDDEN.containsKey(path)) {
+                hidden = true;
+                break;
+            }
+            path = path.getParent() instanceof View parent ? parent : null;
+        }
+        return ImmersiveTouchPolicy.shouldBlock(hidden, GESTURE_PATHS.contains(view), cancel);
+    }
+
     private static void reassertHiddenViews() {
         synchronized (HIDDEN) {
             for (Map.Entry<View, SavedView> entry :
@@ -1238,6 +1286,7 @@ final class ImmersiveUi {
                 }
             }
             HIDDEN.clear();
+            GESTURE_PATHS.clear();
         }
         if (restored > 0) {
             Log.d(DouyinModule.TAG,
