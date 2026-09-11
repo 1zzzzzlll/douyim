@@ -14,8 +14,8 @@ android {
         applicationId = "com.zz.douyin"
         minSdk = 28
         targetSdk = 35
-        versionCode = 14
-        versionName = "1.4.3"
+        versionCode = 15
+        versionName = "1.4.4"
     }
 
     buildTypes {

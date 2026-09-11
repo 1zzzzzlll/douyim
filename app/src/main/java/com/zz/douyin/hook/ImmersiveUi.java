@@ -1262,8 +1262,11 @@ final class ImmersiveUi {
     ) {
         if (leavingActivity) {
             detachHiddenViewGuard();
-            restoreExpandedViewports();
         }
+        // The feed description is bottom-aligned inside the expanded pager.
+        // Restore its original bounds before showing the bottom navigation,
+        // including when playback pauses without leaving the activity.
+        restoreExpandedViewports();
         int restored = 0;
         StringBuilder samples = new StringBuilder();
         synchronized (HIDDEN) {
