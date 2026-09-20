@@ -1,0 +1,14 @@
+MP3 encoding uses jump3r 1.0.5 (de.sciss:jump3r:1.0.5), a Java port of LAME.
+Copyright and author notices are preserved in the upstream source files.
+License: GNU Lesser General Public License, version 2.1 or later.
+The complete license text is included in LGPL-2.1.txt in this directory.
+
+Project: https://git.iem.at/sciss/jump3r
+Exact corresponding library source:
+https://repo.maven.apache.org/maven2/de/sciss/jump3r/1.0.5/jump3r-1.0.5-sources.jar
+Unmodified library binary:
+https://repo.maven.apache.org/maven2/de/sciss/jump3r/1.0.5/jump3r-1.0.5.jar
+
+The library is unmodified. The Android PCM adapter is Mp3Encoder.java in
+https://github.com/1zzzzzlll/douyim . Build instructions are in README.md;
+app/build.gradle.kts declares the replaceable library dependency.

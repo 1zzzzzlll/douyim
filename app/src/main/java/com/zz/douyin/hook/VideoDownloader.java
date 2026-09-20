@@ -2,11 +2,13 @@ package com.zz.douyin.hook;
 
 import android.annotation.TargetApi;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
 import android.net.Uri;
+import android.media.MediaScannerConnection;
 import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
@@ -16,6 +18,9 @@ import android.util.Log;
 import android.widget.Toast;
 
 import java.io.IOException;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -27,6 +32,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 final class VideoDownloader {
+    private static AlertDialog chooser;
     private static final int CONNECT_TIMEOUT_MS = 15_000;
     private static final int READ_TIMEOUT_MS = 30_000;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
@@ -41,30 +47,63 @@ final class VideoDownloader {
     private VideoDownloader() {
     }
 
-    static void download(Activity activity, FeedContentTracker.Snapshot snapshot) {
+    static void chooseDownload(Activity activity, FeedContentTracker.Snapshot snapshot) {
+        if (!ImmersiveUi.isModuleEnabled() || activity == null
+                || activity.isFinishing() || activity.isDestroyed()) return;
+        if (snapshot == null || !snapshot.hasDownloadUrl()) {
+            showToast(activity, "当前视频地址暂不可用");
+            return;
+        }
+        dismissChooser();
+        chooser = new AlertDialog.Builder(activity)
+                .setTitle("下载当前内容")
+                .setItems(new String[]{"视频（无水印 MP4）", "音频（MP3）"},
+                        (dialog, which) -> download(activity, snapshot, which == 1))
+                .setNegativeButton("取消", null)
+                .create();
+        chooser.setOnDismissListener(dialog -> { if (chooser == dialog) chooser = null; });
+        chooser.show();
+    }
+
+    static void dismissChooser() {
+        if (chooser != null) {
+            chooser.dismiss();
+            chooser = null;
+        }
+    }
+
+    static void ensureEnabled() throws IOException {
+        if (!ImmersiveUi.isModuleEnabled()) throw new IOException("功能总开关已关闭，下载已取消");
+    }
+
+    private static void download(Activity activity, FeedContentTracker.Snapshot snapshot, boolean audio) {
+        if (!ImmersiveUi.isModuleEnabled()) return;
         if (activity == null || snapshot == null || !snapshot.hasDownloadUrl()) {
             showToast(activity, "当前视频地址暂不可用");
             return;
         }
         Context context = activity.getApplicationContext();
         FeedContentTracker.PlayUrl first = snapshot.playUrls.get(0);
-        String key = snapshot.aid + ':' + first.url.hashCode();
+        String key = snapshot.aid + ':' + first.url.hashCode() + ':' + audio;
         if (!ACTIVE.add(key)) {
-            showToast(activity, "当前视频正在下载");
+            showToast(activity, "当前" + (audio ? "音频" : "视频") + "正在下载");
             return;
         }
 
-        String fileName = buildFileName(snapshot.aid);
-        showToast(activity, "开始下载无水印视频");
+        String fileName = buildFileName(snapshot.aid, audio);
+        showToast(activity, audio ? "开始下载音频，完成后保存为 MP3" : "开始下载无水印视频");
         Log.i(DouyinModule.TAG,
                 "download requested: aid=" + snapshot.aid
                         + " candidates=" + snapshot.playUrls.size()
-                        + " primary=" + first.source);
+                        + " primary=" + first.source + " format=" + (audio ? "mp3" : "mp4"));
 
         WORKER.execute(() -> {
             DownloadResult result;
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ensureEnabled();
+                if (audio) {
+                    result = downloadAudio(context, snapshot, fileName);
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     result = downloadWithMediaStore(context, snapshot, fileName);
                 } else {
                     result = enqueueWithDownloadManager(context, snapshot, fileName);
@@ -87,10 +126,104 @@ final class VideoDownloader {
                     showToast(context,
                             "已加入下载队列：Download/" + finalResult.fileName);
                 } else {
-                    showToast(context, "下载失败，请稍后重试");
+                    showToast(context, !ImmersiveUi.isModuleEnabled()
+                            ? "功能总开关已关闭，下载已取消"
+                            : "下载失败" + (finalResult.error == null
+                            ? "，请稍后重试" : "：" + finalResult.error));
                 }
             });
         });
+    }
+
+    private static DownloadResult downloadAudio(Context context,
+                                                FeedContentTracker.Snapshot snapshot,
+                                                String fileName) throws IOException {
+        File source = File.createTempFile("douxianren-source-", ".mp4", context.getCacheDir());
+        File mp3 = null;
+        try {
+            mp3 = File.createTempFile("douxianren-audio-", ".mp3", context.getCacheDir());
+            IOException lastError = null;
+            for (FeedContentTracker.PlayUrl candidate : snapshot.playUrls) {
+                ensureEnabled();
+                HttpURLConnection connection = null;
+                try {
+                    connection = openConnection(candidate.url);
+                    int status = connection.getResponseCode();
+                    if (status < 200 || status >= 300) throw new IOException("HTTP " + status);
+                    long bytes;
+                    try (InputStream input = connection.getInputStream();
+                         OutputStream output = new FileOutputStream(source)) {
+                        bytes = copy(input, output);
+                    }
+                    long expected = connection.getContentLengthLong();
+                    if (bytes == 0 || (expected > 0 && bytes != expected)) {
+                        throw new IOException("视频源下载不完整");
+                    }
+                    MAIN.post(() -> showToast(context, "正在提取音频并转换为 MP3…"));
+                    AudioTranscoder.toMp3(source, mp3);
+                    ensureEnabled();
+                    publishAudio(context, mp3, fileName);
+                    Log.i(DouyinModule.TAG, "audio download completed: aid=" + snapshot.aid
+                            + " bytes=" + mp3.length() + " file=" + fileName);
+                    return DownloadResult.completed(fileName);
+                } catch (IOException | RuntimeException error) {
+                    lastError = new IOException(error.getMessage(), error);
+                    Log.w(DouyinModule.TAG, "audio candidate failed: " + candidate.source, error);
+                } finally {
+                    if (connection != null) connection.disconnect();
+                }
+            }
+            return DownloadResult.failed(lastError == null ? null : lastError.getMessage());
+        } finally {
+            if (!source.delete()) Log.w(DouyinModule.TAG, "could not delete temporary source");
+            if (mp3 != null && !mp3.delete()) Log.w(DouyinModule.TAG, "could not delete temporary MP3");
+        }
+    }
+
+    private static void publishAudio(Context context, File mp3, String fileName) throws IOException {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContentResolver resolver = context.getContentResolver();
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
+            values.put(MediaStore.MediaColumns.MIME_TYPE, "audio/mpeg");
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            Uri destination = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+            if (destination == null) throw new IOException("无法创建音频文件");
+            boolean published = false;
+            try {
+                try (InputStream input = new FileInputStream(mp3);
+                     OutputStream output = resolver.openOutputStream(destination, "w")) {
+                    if (output == null) throw new IOException("无法写入音频文件");
+                    copy(input, output);
+                }
+                ensureEnabled();
+                values.clear();
+                values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                if (resolver.update(destination, values, null, null) != 1) {
+                    throw new IOException("无法保存音频文件");
+                }
+                published = true;
+            } finally {
+                if (!published) resolver.delete(destination, null, null);
+            }
+        } else {
+            File directory = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+            if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("无法创建 Download 目录");
+            File destination = new File(directory, fileName);
+            boolean published = false;
+            try {
+                try (InputStream input = new FileInputStream(mp3);
+                     OutputStream output = new FileOutputStream(destination)) {
+                    copy(input, output);
+                }
+                published = true;
+                MediaScannerConnection.scanFile(context,
+                        new String[]{destination.getAbsolutePath()}, new String[]{"audio/mpeg"}, null);
+            } finally {
+                if (!published && !destination.delete()) Log.w(DouyinModule.TAG, "partial audio cleanup failed");
+            }
+        }
     }
 
     @TargetApi(Build.VERSION_CODES.Q)
@@ -105,6 +238,7 @@ final class VideoDownloader {
             HttpURLConnection connection = null;
             Uri destination = null;
             try {
+                ensureEnabled();
                 connection = openConnection(candidate.url);
                 int status = connection.getResponseCode();
                 if (status < 200 || status >= 300) {
@@ -141,10 +275,12 @@ final class VideoDownloader {
                     }
                     bytes = copy(input, output);
                 }
-                if (bytes <= 0L) {
-                    throw new IOException("empty response");
+                long expected = connection.getContentLengthLong();
+                if (bytes <= 0L || (expected > 0 && expected != bytes)) {
+                    throw new IOException("empty or incomplete response");
                 }
 
+                ensureEnabled();
                 values.clear();
                 values.put(MediaStore.MediaColumns.IS_PENDING, 0);
                 if (resolver.update(destination, values, null, null) != 1) {
@@ -249,6 +385,7 @@ final class VideoDownloader {
         long total = 0L;
         int read;
         while ((read = input.read(buffer)) != -1) {
+            ensureEnabled();
             output.write(buffer, 0, read);
             total += read;
         }
@@ -256,14 +393,14 @@ final class VideoDownloader {
         return total;
     }
 
-    private static String buildFileName(String aid) {
+    private static String buildFileName(String aid, boolean audio) {
         String safeAid = aid == null
                 ? ""
                 : aid.replaceAll("[^0-9A-Za-z_-]", "");
         if (safeAid.isEmpty() || "unknown".equalsIgnoreCase(safeAid)) {
             safeAid = "video";
         }
-        return "douyin_" + safeAid + '_' + System.currentTimeMillis() + ".mp4";
+        return "douyin_" + safeAid + '_' + System.currentTimeMillis() + (audio ? ".mp3" : ".mp4");
     }
 
     private static void showToast(Context context, String message) {
@@ -276,6 +413,7 @@ final class VideoDownloader {
         final boolean completed;
         final boolean queued;
         final String fileName;
+        String error;
 
         private DownloadResult(boolean completed, boolean queued, String fileName) {
             this.completed = completed;
@@ -293,6 +431,12 @@ final class VideoDownloader {
 
         static DownloadResult failed() {
             return new DownloadResult(false, false, null);
+        }
+
+        static DownloadResult failed(String error) {
+            DownloadResult result = failed();
+            result.error = error;
+            return result;
         }
     }
 }

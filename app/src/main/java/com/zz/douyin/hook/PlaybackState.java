@@ -479,6 +479,17 @@ final class PlaybackState {
         Log.i(DouyinModule.TAG, "playback=user-resumed");
     }
 
+    static synchronized void clearModuleIntents() {
+        userPaused = false;
+        userPausedAt = 0L;
+        userPausedEngine.clear();
+        userPausedAid = null;
+        clearPendingSwitchPlayer();
+        expectedVideoSwitchUntil = 0L;
+        consumePlaybackError();
+        consumeLoopBoundary();
+    }
+
     static synchronized boolean clearUserPauseForContentChange(String visibleAid) {
         String pausedAid = userPausedAid;
         if (!userPaused

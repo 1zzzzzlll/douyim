@@ -14,8 +14,8 @@ android {
         applicationId = "com.zz.douyin"
         minSdk = 28
         targetSdk = 35
-        versionCode = 15
-        versionName = "1.4.4"
+        versionCode = 17
+        versionName = "1.5.1"
     }
 
     buildTypes {
@@ -55,6 +55,7 @@ android {
 dependencies {
     compileOnly(libs.libxposed.api)
     implementation(libs.libxposed.service)
+    implementation("de.sciss:jump3r:1.0.5")
     testImplementation(libs.libxposed.api)
     testImplementation("junit:junit:4.13.2")
 }

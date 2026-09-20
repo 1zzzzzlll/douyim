@@ -29,6 +29,9 @@ public final class MainActivity extends Activity
     private static final int TEXT_SECONDARY = Color.rgb(169, 171, 180);
 
     private TextView serviceStatus;
+    private Switch moduleEnabled;
+    private Switch blockDoubleTap;
+    private Switch immersiveEnabled;
     private Switch skipAds;
     private Switch skipImages;
     private Switch skipLives;
@@ -87,6 +90,14 @@ public final class MainActivity extends Activity
         statusParams.topMargin = dp(16);
         root.addView(serviceStatus, statusParams);
 
+        LinearLayout masterCard = card();
+        moduleEnabled = addSwitch(masterCard, "功能总开关",
+                "关闭后恢复抖音原有界面和操作，所有模块功能停止生效",
+                FilterPreferences.KEY_MODULE_ENABLED);
+        LinearLayout.LayoutParams masterParams = matchWrap();
+        masterParams.topMargin = dp(20);
+        root.addView(masterCard, masterParams);
+
         TextView typeHeader = sectionTitle("跳过类型");
         LinearLayout.LayoutParams typeHeaderParams = matchWrap();
         typeHeaderParams.topMargin = dp(28);
@@ -130,12 +141,20 @@ public final class MainActivity extends Activity
         root.addView(playbackHeader, playbackHeaderParams);
 
         LinearLayout playbackCard = card();
+        immersiveEnabled = addSwitch(playbackCard, "沉浸式播放",
+                "播放时隐藏界面，暂停时恢复；关闭后仍可使用过滤、双击拦截和下载",
+                FilterPreferences.KEY_IMMERSIVE_ENABLED);
+        addDivider(playbackCard);
         showDanmaku = addSwitch(
                 playbackCard,
                 "播放弹幕",
                 "纯净播放时保留抖音原生弹幕，其他界面仍保持隐藏",
                 FilterPreferences.KEY_SHOW_DANMAKU
         );
+        addDivider(playbackCard);
+        blockDoubleTap = addSwitch(playbackCard, "禁用屏幕双击",
+                "拦截视频画面双击，保留单击暂停、滑动和侧边长按",
+                FilterPreferences.KEY_BLOCK_DOUBLE_TAP);
         LinearLayout.LayoutParams playbackCardParams = matchWrap();
         playbackCardParams.topMargin = dp(10);
         root.addView(playbackCard, playbackCardParams);
@@ -215,6 +234,9 @@ public final class MainActivity extends Activity
         }
 
         preferences = service.getRemotePreferences(FilterPreferences.NAME);
+        moduleEnabled.setChecked(FilterPreferences.readModuleEnabled(preferences));
+        immersiveEnabled.setChecked(FilterPreferences.readImmersiveEnabled(preferences));
+        blockDoubleTap.setChecked(FilterPreferences.readBlockDoubleTap(preferences));
         FilterPreferences.Values values = FilterPreferences.read(preferences);
         skipAds.setChecked(values.skipAds);
         skipImages.setChecked(values.skipImages);
@@ -256,6 +278,7 @@ public final class MainActivity extends Activity
         row.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         Switch toggle = new Switch(this);
+        toggle.setContentDescription(label);
         toggle.setShowText(false);
         toggle.setButtonTintList(null);
         toggle.setOnCheckedChangeListener((button, checked) -> {
@@ -298,6 +321,9 @@ public final class MainActivity extends Activity
     }
 
     private void setControlsEnabled(boolean enabled) {
+        moduleEnabled.setEnabled(enabled);
+        blockDoubleTap.setEnabled(enabled);
+        immersiveEnabled.setEnabled(enabled);
         skipAds.setEnabled(enabled);
         skipImages.setEnabled(enabled);
         skipLives.setEnabled(enabled);

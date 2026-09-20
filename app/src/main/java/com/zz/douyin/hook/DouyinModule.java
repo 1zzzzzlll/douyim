@@ -40,6 +40,10 @@ public final class DouyinModule extends XposedModule {
 
         installSubsystem("activity lifecycle", this::hookActivityLifecycle);
         installSubsystem("activity touch", this::hookActivityTouch);
+        installSubsystem("feed double tap guard",
+                () -> DoubleTapGuard.installFeedInterceptor(this, param.getClassLoader()));
+        installSubsystem("native double tap guard",
+                () -> DoubleTapGuard.installPlatformListeners(this));
         installSubsystem("hidden control touch",
                 () -> ImmersiveTouchGuard.install(this, param.getClassLoader()));
         installSubsystem("instrumentation lifecycle", this::hookInstrumentationLifecycle);

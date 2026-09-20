@@ -51,13 +51,13 @@ final class ImmersiveUi {
             };
     private static WeakReference<View> hiddenGuardRoot = new WeakReference<>(null);
     private static volatile boolean showDanmaku;
+    private static volatile boolean moduleEnabled = true;
+    private static volatile boolean blockDoubleTap;
+    private static volatile boolean immersiveEnabled = true;
     private static SharedPreferences immersivePreferences;
     private static final SharedPreferences.OnSharedPreferenceChangeListener
             PREFERENCE_LISTENER = (preferences, key) -> {
-                if (com.zz.douyin.FilterPreferences.KEY_SHOW_DANMAKU.equals(key)) {
-                    showDanmaku = com.zz.douyin.FilterPreferences
-                            .readShowDanmaku(preferences);
-                }
+                refreshPreferences(preferences);
             };
 
     private static WeakReference<Activity> active = new WeakReference<>(null);
@@ -107,10 +107,50 @@ final class ImmersiveUi {
             }
         }
         immersivePreferences = preferences;
-        showDanmaku = com.zz.douyin.FilterPreferences.readShowDanmaku(preferences);
+        refreshPreferences(preferences);
         if (preferences != null) {
             preferences.registerOnSharedPreferenceChangeListener(PREFERENCE_LISTENER);
         }
+    }
+
+    static boolean isModuleEnabled() {
+        return moduleEnabled;
+    }
+
+    static boolean shouldBlockDoubleTap() {
+        return moduleEnabled && blockDoubleTap;
+    }
+
+    private static void refreshPreferences(SharedPreferences preferences) {
+        boolean enabled = com.zz.douyin.FilterPreferences.readModuleEnabled(preferences);
+        boolean changed = moduleEnabled != enabled;
+        moduleEnabled = enabled;
+        blockDoubleTap = com.zz.douyin.FilterPreferences.readBlockDoubleTap(preferences);
+        immersiveEnabled = com.zz.douyin.FilterPreferences.readImmersiveEnabled(preferences);
+        showDanmaku = com.zz.douyin.FilterPreferences.readShowDanmaku(preferences);
+        MAIN.post(() -> {
+            if (changed) {
+                touchGestureToken++;
+                touchInProgress = false;
+                transitionBoostUntil = 0L;
+                resetFilterCandidate();
+                PlaybackState.clearModuleIntents();
+                Log.i(DouyinModule.TAG, "module enabled=" + moduleEnabled);
+            }
+            if (!moduleEnabled) {
+                removeDownloadButton();
+                VideoDownloader.dismissChooser();
+                Activity activity = activeActivity();
+                restoreAll(activity, activeDecor(activity));
+            } else {
+                if (!immersiveEnabled) {
+                    Activity activity = activeActivity();
+                    restoreAll(activity, activeDecor(activity));
+                }
+                armContentFilter(1_000L);
+            }
+            scheduleScan(0L);
+        });
     }
 
     static void onActivityResumed(Activity activity) {
@@ -133,6 +173,7 @@ final class ImmersiveUi {
             Activity current = active.get();
             if (current == activity) {
                 removeDownloadButton();
+                VideoDownloader.dismissChooser();
                 restoreAll(current);
                 active.clear();
                 activeRoot.clear();
@@ -142,6 +183,7 @@ final class ImmersiveUi {
     }
 
     static void onFeedPageSelected() {
+        if (!moduleEnabled) return;
         PlaybackState.beginAutoSwitch();
         MAIN.post(() -> {
             boostTransitionWindow();
@@ -151,6 +193,7 @@ final class ImmersiveUi {
     }
 
     static void beforeActivityTouch(Activity activity, MotionEvent event) {
+        if (!moduleEnabled) return;
         if (swipeRunning
                 || !touchInProgress
                 || event.getActionMasked() != MotionEvent.ACTION_UP
@@ -172,6 +215,7 @@ final class ImmersiveUi {
     }
 
     static void onActivityTouch(Activity activity, MotionEvent event) {
+        if (!moduleEnabled) return;
         int action = event.getActionMasked();
         if (swipeRunning) {
             if (touchInProgress
@@ -375,6 +419,7 @@ final class ImmersiveUi {
 
     static void onPlaybackChanged(boolean playing) {
         MAIN.post(() -> {
+            if (!moduleEnabled) return;
             if (playing) {
                 boostTransitionWindow();
             }
@@ -390,7 +435,7 @@ final class ImmersiveUi {
             } else {
                 long token = PlaybackState.generation();
                 MAIN.postDelayed(() -> {
-                    if (token == PlaybackState.generation()
+                    if (moduleEnabled && token == PlaybackState.generation()
                             && !PlaybackState.shouldKeepUiHidden()) {
                         Activity currentActivity = activeActivity();
                         View currentDecor = activeDecor(currentActivity);
@@ -404,6 +449,7 @@ final class ImmersiveUi {
 
     static void onPlaybackCompleted(String reason) {
         MAIN.post(() -> {
+            if (!moduleEnabled) return;
             Activity activity = activeActivity();
             View decor = activeDecor(activity);
             if (decor == null) {
@@ -442,6 +488,12 @@ final class ImmersiveUi {
     private static void scanOnce() {
         Activity activity = activeActivity();
         View decor = activeDecor(activity);
+        if (!moduleEnabled) {
+            removeDownloadButton();
+            restoreAll(activity, decor);
+            scheduleScan(500L);
+            return;
+        }
         if (decor == null) {
             scheduleScan(250L);
             return;
@@ -467,7 +519,7 @@ final class ImmersiveUi {
             return;
         }
 
-        boolean keepUiHidden = PlaybackState.shouldKeepUiHidden();
+        boolean keepUiHidden = immersiveEnabled && PlaybackState.shouldKeepUiHidden();
         RenderViews realVideos =
                 keepUiHidden
                         ? findVisibleRealVideoViews(decor)
@@ -565,7 +617,7 @@ final class ImmersiveUi {
     }
 
     private static void showDownloadButton(Activity activity, View decor) {
-        if (activity == null
+        if (!moduleEnabled || activity == null
                 || decor == null
                 || !PlaybackState.isUserPaused()
                 || !(decor instanceof FrameLayout container)) {
@@ -590,7 +642,7 @@ final class ImmersiveUi {
         button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
         button.setGravity(Gravity.CENTER);
         button.setIncludeFontPadding(false);
-        button.setContentDescription("下载无水印视频");
+        button.setContentDescription("下载视频或音频");
         button.setClickable(true);
         button.setFocusable(true);
         button.setElevation(dp(decor, 6));
@@ -601,7 +653,7 @@ final class ImmersiveUi {
         background.setStroke(dp(decor, 1), 0x66FFFFFF);
         button.setBackground(background);
         button.setOnClickListener(ignored -> {
-            if (!PlaybackState.isUserPaused()) {
+            if (!moduleEnabled || !PlaybackState.isUserPaused()) {
                 removeDownloadButton();
                 return;
             }
@@ -609,7 +661,7 @@ final class ImmersiveUi {
             View currentDecor = activeDecor(currentActivity);
             FeedContentTracker.Snapshot snapshot =
                     FeedContentTracker.current(currentDecor);
-            VideoDownloader.download(currentActivity, snapshot);
+            VideoDownloader.chooseDownload(currentActivity, snapshot);
         });
 
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
@@ -1186,12 +1238,12 @@ final class ImmersiveUi {
     }
 
     static boolean isImmersiveGestureView(View view) {
-        return hasHiddenViews() && GESTURE_PATHS.contains(view)
+        return moduleEnabled && immersiveEnabled && hasHiddenViews() && GESTURE_PATHS.contains(view)
                 && ImmersiveTouchPolicy.isGestureView(view.getClass().getName());
     }
 
     static boolean shouldBlockHiddenTouch(View view, boolean cancel) {
-        if (cancel || !hasHiddenViews()) {
+        if (!moduleEnabled || !immersiveEnabled || cancel || !hasHiddenViews()) {
             return false;
         }
         boolean hidden = false;
@@ -1207,6 +1259,7 @@ final class ImmersiveUi {
     }
 
     private static void reassertHiddenViews() {
+        if (!moduleEnabled || !immersiveEnabled) return;
         synchronized (HIDDEN) {
             for (Map.Entry<View, SavedView> entry :
                     new ArrayList<>(HIDDEN.entrySet())) {
@@ -1339,6 +1392,7 @@ final class ImmersiveUi {
     }
 
     private static boolean swipeToNext(View decor, String reason) {
+        if (!moduleEnabled) return false;
         long now = SystemClock.uptimeMillis();
         if (swipeRunning
                 || !decor.isAttachedToWindow()
@@ -1377,6 +1431,12 @@ final class ImmersiveUi {
             final int step = i;
             MAIN.postDelayed(() -> {
                 if (!swipeRunning || currentSwipeToken != swipeToken) {
+                    return;
+                }
+                if (!moduleEnabled) {
+                    dispatch(decor, downTime, SystemClock.uptimeMillis(),
+                            MotionEvent.ACTION_CANCEL, x, startY);
+                    finishSwipe(currentSwipeToken, "module disabled", null);
                     return;
                 }
                 float fraction = step / (float) steps;
