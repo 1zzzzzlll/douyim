@@ -21,7 +21,7 @@ public final class DouyinModule extends XposedModule {
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
-        log(Log.INFO, TAG, "loaded in " + param.getProcessName()
+        log(Log.INFO, TAG, "module 1.6.0 loaded in " + param.getProcessName()
                 + ", framework=" + getFrameworkName()
                 + ", api=" + getApiVersion());
     }

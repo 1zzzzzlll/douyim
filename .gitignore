@@ -7,3 +7,6 @@
 # The pulled target APK is only an analysis input and must not be committed.
 /target-apk/
 /.codex-backups/
+
+# WorkBuddy workspace data (analysis inputs, screenshots, local scripts)
+/.workbuddy/

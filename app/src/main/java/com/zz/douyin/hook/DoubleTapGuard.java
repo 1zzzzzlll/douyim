@@ -31,6 +31,10 @@ final class DoubleTapGuard {
                 .setId("douyin-block-feed-double-click")
                 .setExceptionMode(DouyinModule.ExceptionMode.PROTECTIVE)
                 .intercept(chain -> {
+                    if (ImmersiveUi.shouldOpenCommentsOnDoubleTap()) {
+                        ImmersiveUi.onDoubleTapForComments();
+                        return true;
+                    }
                     if (ImmersiveUi.shouldBlockDoubleTap()) {
                         Log.i(DouyinModule.TAG, "blocked feed double tap before component dispatch");
                         return true;
@@ -78,6 +82,12 @@ final class DoubleTapGuard {
                         // DPlayer can dispatch from a parent before LongPressLayout.
                         // The module is installed only inside Douyin, so include these
                         // native video/zoom callbacks regardless of the current child.
+                        if (ImmersiveUi.shouldOpenCommentsOnDoubleTap()) {
+                            if (name.equals("onDoubleTap")) {
+                                ImmersiveUi.onDoubleTapForComments();
+                            }
+                            return true;
+                        }
                         if (ImmersiveUi.shouldBlockDoubleTap()) {
                             if (name.equals("onDoubleTap")) {
                                 Log.i(DouyinModule.TAG, "blocked native double tap: "

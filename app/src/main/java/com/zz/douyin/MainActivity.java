@@ -37,6 +37,7 @@ public final class MainActivity extends Activity
     private Switch skipLives;
     private Switch skipVideos;
     private Switch showDanmaku;
+    private Switch doubleTapComments;
     private EditText keywordInput;
     private Button saveKeywords;
     private SharedPreferences preferences;
@@ -152,6 +153,13 @@ public final class MainActivity extends Activity
                 FilterPreferences.KEY_SHOW_DANMAKU
         );
         addDivider(playbackCard);
+        doubleTapComments = addSwitch(
+                playbackCard,
+                "双击打开评论区",
+                "播放时双击视频画面打开评论区，不再触发点赞和爱心动画",
+                FilterPreferences.KEY_DOUBLE_TAP_COMMENTS
+        );
+        addDivider(playbackCard);
         blockDoubleTap = addSwitch(playbackCard, "禁用屏幕双击",
                 "拦截视频画面双击，保留单击暂停、滑动和侧边长按",
                 FilterPreferences.KEY_BLOCK_DOUBLE_TAP);
@@ -243,6 +251,9 @@ public final class MainActivity extends Activity
         skipLives.setChecked(values.skipLives);
         skipVideos.setChecked(values.skipVideos);
         showDanmaku.setChecked(FilterPreferences.readShowDanmaku(preferences));
+        doubleTapComments.setChecked(
+                FilterPreferences.readDoubleTapComments(preferences)
+        );
         keywordInput.setText(values.keywordText);
         keywordInput.setSelection(keywordInput.length());
         serviceStatus.setText(
@@ -329,6 +340,7 @@ public final class MainActivity extends Activity
         skipLives.setEnabled(enabled);
         skipVideos.setEnabled(enabled);
         showDanmaku.setEnabled(enabled);
+        doubleTapComments.setEnabled(enabled);
         keywordInput.setEnabled(enabled);
         saveKeywords.setEnabled(enabled);
         saveKeywords.setAlpha(enabled ? 1f : 0.45f);

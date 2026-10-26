@@ -34,6 +34,7 @@ final class FeedContentTracker {
     private static Method getCurrentAweme;
     private static Field viewPagerField;
     private static WeakReference<Object> selectedPanel = new WeakReference<>(null);
+    private static WeakReference<Object> lastPanel = new WeakReference<>(null);
     private static volatile FilterPreferences.Values filterSettings =
             FilterPreferences.defaults();
     private static SharedPreferences filterPreferences;
@@ -128,6 +129,7 @@ final class FeedContentTracker {
         }
 
         Object bestAweme = null;
+        Object bestPanel = null;
         long bestScore = Long.MIN_VALUE;
         Object selected = selectedPanel.get();
         Rect decorVisible = new Rect();
@@ -172,12 +174,36 @@ final class FeedContentTracker {
                 if (score > bestScore) {
                     bestScore = score;
                     bestAweme = aweme;
+                    bestPanel = panel;
                 }
             } catch (ReflectiveOperationException | RuntimeException error) {
                 Log.d(DouyinModule.TAG, "current feed model lookup failed", error);
             }
         }
+        if (bestPanel != null) {
+            lastPanel = new WeakReference<>(bestPanel);
+        }
         return bestAweme == null ? null : snapshot(bestAweme, filterSettings);
+    }
+
+    /** ViewPager of the feed panel that currently owns the screen, used for programmatic paging. */
+    static View currentPager(View decor) {
+        Object panel = lastPanel.get();
+        Field pagerField = viewPagerField;
+        if (panel == null || pagerField == null) {
+            return null;
+        }
+        try {
+            Object pager = pagerField.get(panel);
+            if (pager instanceof View view
+                    && view.isAttachedToWindow()
+                    && (decor == null || view.getRootView() == decor)) {
+                return view;
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // Panels are recycled aggressively; the caller falls back to the decor view.
+        }
+        return null;
     }
 
     private static boolean isEffectivelyVisible(View view, View decor) {
@@ -215,7 +241,16 @@ final class FeedContentTracker {
         String aid = stringValue(readField(type, aweme, "aid"));
         int awemeType = intValue(readField(type, aweme, "awemeType"), -1);
         boolean ad = booleanValue(readField(type, aweme, "isAd"));
-        Object rawAd = invokeNoArg(type, aweme, "getAwemeRawAd");
+        Object rawAd = readField(type, aweme, "awemeRawAd");
+        if (rawAd == null) {
+            rawAd = invokeNoArg(type, aweme, "getAwemeRawAd");
+        }
+        // 40.8 marks several ad formats only through these side channels; isAd/awemeRawAd
+        // stay empty for 电商、团购、直播预约 and 小程序 ads, which therefore played on.
+        int adSource = intValue(readField(type, aweme, "adAwemeSource"), 0);
+        Object gdAd = readField(type, aweme, "gdAd");
+        Object asyncAdInfo = readField(type, aweme, "asyncAdInfo");
+        Object linkAdData = readField(type, aweme, "linkAdData");
         boolean live = booleanValue(invokeNoArg(type, aweme, "isLive"))
                 || awemeType == 101;
         boolean hostImage = booleanValue(invokeNoArg(type, aweme, "isImage"));
@@ -261,7 +296,12 @@ final class FeedContentTracker {
                         || awemeType == 0x44
                         || imageCount > 0
                         || imageInfoCount > 0;
-        boolean advertisement = ad || rawAd != null;
+        // Only ad-exclusive markers may decide the skip. adAwemeSource / asyncAdInfo /
+        // linkAdData exist on ordinary videos too (40.8 fills asyncAdInfo for every feed
+        // item), so using them skipped the whole feed; they are logged for diagnosis only.
+        boolean advertisement = ad || rawAd != null || gdAd != null;
+        boolean photoContent = photo || awemeType == 0xA3;
+        String adMarkers = adMarkerText(ad, rawAd, adSource, gdAd, asyncAdInfo, linkAdData);
         FilterPreferences.Values activeSettings =
                 settings == null ? FilterPreferences.defaults() : settings;
 
@@ -310,11 +350,31 @@ final class FeedContentTracker {
                 hostImage,
                 hostMultiImage,
                 slides,
+                photoContent,
                 title,
                 description,
                 reason,
-                playUrls
+                playUrls,
+                adMarkers
         );
+    }
+
+    private static String adMarkerText(
+            boolean isAd,
+            Object rawAd,
+            int source,
+            Object gdAd,
+            Object asyncAdInfo,
+            Object linkAdData
+    ) {
+        StringBuilder markers = new StringBuilder();
+        if (isAd) markers.append("isAd,");
+        if (rawAd != null) markers.append("rawAd,");
+        if (source > 0) markers.append("source=").append(source).append(',');
+        if (gdAd != null) markers.append("gdAd,");
+        if (asyncAdInfo != null) markers.append("async,");
+        if (linkAdData != null) markers.append("link,");
+        return markers.length() == 0 ? "none" : markers.toString();
     }
 
     private static Object readField(Class<?> type, Object instance, String name) {
@@ -499,10 +559,12 @@ final class FeedContentTracker {
         final boolean hostImage;
         final boolean hostMultiImage;
         final boolean slides;
+        final boolean photoContent;
         final String title;
         final String description;
         final String filterReason;
         final List<PlayUrl> playUrls;
+        final String adMarkers;
 
         Snapshot(
                 String aid,
@@ -517,10 +579,12 @@ final class FeedContentTracker {
                 boolean hostImage,
                 boolean hostMultiImage,
                 boolean slides,
+                boolean photoContent,
                 String title,
                 String description,
                 String filterReason,
-                List<PlayUrl> playUrls
+                List<PlayUrl> playUrls,
+                String adMarkers
         ) {
             this.aid = aid;
             this.awemeType = awemeType;
@@ -534,10 +598,12 @@ final class FeedContentTracker {
             this.hostImage = hostImage;
             this.hostMultiImage = hostMultiImage;
             this.slides = slides;
+            this.photoContent = photoContent;
             this.title = title;
             this.description = description;
             this.filterReason = filterReason;
             this.playUrls = playUrls;
+            this.adMarkers = adMarkers;
         }
 
         boolean shouldFilter() {
@@ -558,6 +624,7 @@ final class FeedContentTracker {
                     + " video=" + hasVideo
                     + " isAd=" + isAd
                     + " rawAd=" + hasRawAd
+                    + " adMarkers=" + adMarkers
                     + " article=" + hasArticle
                     + " images=" + imageCount
                     + " imageInfos=" + imageInfoCount
@@ -565,6 +632,7 @@ final class FeedContentTracker {
                     + " hostImage=" + hostImage
                     + " hostMultiImage=" + hostMultiImage
                     + " slides=" + slides
+                    + " photo=" + photoContent
                     + " titleChars=" + title.length()
                     + " descChars=" + description.length()
                     + " playUrls=" + playUrls.size();

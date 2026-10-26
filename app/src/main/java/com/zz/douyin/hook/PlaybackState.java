@@ -36,6 +36,7 @@ final class PlaybackState {
     private static volatile WeakReference<Object> lastPauseSignalEngine =
             new WeakReference<>(null);
 
+    private static volatile boolean photoContent;
     private static volatile Object trackedPlayer;
     private static volatile long trackedDuration;
     private static volatile long lastPosition;
@@ -150,7 +151,9 @@ final class PlaybackState {
     }
 
     static void completed(Object player) {
-        if (userPaused) {
+        if (userPaused || photoContent) {
+            // 图文 uses a short looping music track; a "completion" there is not the end of
+            // the post, so the feed must stay on the image.
             return;
         }
         Object current = engine.get();
@@ -215,6 +218,10 @@ final class PlaybackState {
 
     static boolean isUserPaused() {
         return userPaused;
+    }
+
+    static void setPhotoContent(boolean value) {
+        photoContent = value;
     }
 
     static int engineState(Object candidate) {
@@ -293,7 +300,7 @@ final class PlaybackState {
     }
 
     static synchronized boolean consumeLoopBoundary() {
-        if (userPaused) {
+        if (userPaused || photoContent) {
             return false;
         }
         Object player = resolveActiveEngine();
@@ -313,10 +320,15 @@ final class PlaybackState {
                 trackedPlayer = player;
                 trackedDuration = duration;
                 lastPosition = position;
-                completionArmed = true;
+                // Only arm when the first sample really sits at the beginning of a video.
+                // A recycled engine can still report the previous item's end position right
+                // after a swipe; arming there made every following item look completed.
+                completionArmed = position <= Math.max(100L, Math.min(500L, duration / 20L));
                 Log.i(DouyinModule.TAG,
                         "tracking playback: " + player.getClass().getName()
-                                + ", duration=" + duration);
+                                + ", duration=" + duration
+                                + ", position=" + position
+                                + ", armed=" + completionArmed);
                 return false;
             }
 
@@ -573,6 +585,21 @@ final class PlaybackState {
         autoSwitchUntil = 0L;
         errorAt = 0L;
         resetProgressTracking(engine.get());
+    }
+
+    /**
+     * Drops the position baseline after a module-driven swipe.
+     *
+     * <p>Host engines are recycled for the next feed item, so a stale "near the end" sample
+     * from the previous video makes the very first sample of the new one look like a loop
+     * boundary, which used to auto-advance every single video forever.</p>
+     */
+    static synchronized void resetProgressAfterSwipe() {
+        trackedPlayer = null;
+        trackedDuration = 0L;
+        lastPosition = -1L;
+        completionArmed = false;
+        lastAutoAdvanceAt = SystemClock.uptimeMillis();
     }
 
     private static synchronized void resetProgressTracking(Object player) {
