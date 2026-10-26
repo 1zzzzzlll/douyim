@@ -138,6 +138,43 @@ LSPosed 中重新启用新包名模块并确认作用域。
 Gradle 中间产物会写入系统临时目录下的 `douyin-immersive-gradle/app`，最终构建产物位于该目录的
 `outputs/apk/release` 下。仓库中经过验证、可直接安装的版本保存在 [`dist`](dist) 目录。
 
+## 发版流程
+
+按顺序执行，漏掉第 5 步站点就不会更新。
+
+1. **改版本号**：`app/build.gradle.kts` 中 `versionCode` +1、`versionName` 改为新版本；
+   同时更新本文件「兼容范围」表、「安装」里的 APK 链接。
+2. **构建与检查**：`.\gradlew.bat lintRelease test assembleRelease`，产物在
+   `%TEMP%\douyin-immersive-gradle\app\outputs\apk\release\app-release.apk`。
+3. **归档 APK**：复制为 `dist/douxianren-lsp-api102-v<版本>.apk`，用 `sha256sum` 计算校验值并
+   回填到本文件「安装」一节。
+4. **提交源码**：
+
+   ```bash
+   git add -A
+   git commit -m "发布 <版本>"
+   git push origin HEAD:master   # 工作区在 workbuddy 分支时这样推到 master
+   ```
+
+5. **发布 Release（两个仓库都要建，缺一不可）**：tag 统一为 `<versionCode>-<versionName>`
+   （例如 `18-1.6.0`），标题写版本名，正文写更新日志，并挂上 APK 附件。
+
+   ```bash
+   # 自己的源码仓库
+   gh release create 18-1.6.0 dist/douxianren-lsp-api102-v1.6.0.apk \
+     -R 1zzzzzlll/douyim --title 1.6.0 --notes-file notes.md --target master
+
+   # LSPosed 官方仓库（必须带 APK，机器人只认 release 附件）
+   gh release create 18-1.6.0 dist/douxianren-lsp-api102-v1.6.0.apk \
+     -R Xposed-Modules-Repo/com.zz.douyin --title 1.6.0 --notes-file notes.md
+   ```
+
+   官方仓库建完后，`modules.lsposed.org/module/com.zz.douyin` 会在 5–60 分钟内刷新；
+   **只推 commit 不会更新站点**，官方仓库的 tag 也是机器人从 release 反推的。
+
+6. **实机确认**：安装后强制停止并重开抖音；若行为没有变化，先重启手机——LSPosed 可能仍在加载
+   旧 APK（可用 `adb shell pm path com.zz.douyin` 拉包比对 sha256 确认）。
+
 ## 交流与支持
 
 - Telegram 机器人：[联系机器人使用QW/DD仙人](https://t.me/DDxianren_bot)
