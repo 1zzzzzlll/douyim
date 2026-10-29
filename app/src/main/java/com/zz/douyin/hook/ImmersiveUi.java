@@ -789,10 +789,19 @@ final class ImmersiveUi {
         return resolved;
     }
 
+    /**
+     * 普通视频要「暂停」后才出现下载按钮；图文没有暂停状态（只有背景音乐），
+     * 识别为图文并恢复完整界面时就允许保存图片。
+     */
+    private static boolean canDownload() {
+        return PlaybackState.isContentAvailable()
+                && (PlaybackState.isUserPaused() || PlaybackState.isPhotoContent());
+    }
+
     private static void showDownloadButton(Activity activity, View decor) {
         if (!moduleEnabled || activity == null
                 || decor == null
-                || !PlaybackState.isUserPaused()
+                || !canDownload()
                 || !(decor instanceof FrameLayout container)) {
             removeDownloadButton();
             return;
@@ -815,7 +824,7 @@ final class ImmersiveUi {
         button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
         button.setGravity(Gravity.CENTER);
         button.setIncludeFontPadding(false);
-        button.setContentDescription("下载视频或音频");
+        button.setContentDescription("下载当前视频、音频或图片");
         button.setClickable(true);
         button.setFocusable(true);
         button.setElevation(dp(decor, 6));
@@ -826,7 +835,7 @@ final class ImmersiveUi {
         background.setStroke(dp(decor, 1), 0x66FFFFFF);
         button.setBackground(background);
         button.setOnClickListener(ignored -> {
-            if (!moduleEnabled || !PlaybackState.isUserPaused()) {
+            if (!moduleEnabled || !canDownload()) {
                 removeDownloadButton();
                 return;
             }
@@ -834,7 +843,11 @@ final class ImmersiveUi {
             View currentDecor = activeDecor(currentActivity);
             FeedContentTracker.Snapshot snapshot =
                     FeedContentTracker.current(currentDecor);
-            VideoDownloader.chooseDownload(currentActivity, snapshot);
+            VideoDownloader.chooseDownload(
+                    currentActivity,
+                    snapshot,
+                    () -> FeedContentTracker.current(currentDecor)
+            );
         });
 
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
@@ -854,7 +867,7 @@ final class ImmersiveUi {
 
     private static void repositionDownloadButton(TextView button, View decor) {
         if (downloadButton.get() != button
-                || !PlaybackState.isUserPaused()
+                || !canDownload()
                 || !(button.getLayoutParams() instanceof FrameLayout.LayoutParams params)) {
             return;
         }
@@ -1824,6 +1837,11 @@ final class ImmersiveUi {
         lastContentCheckAt = now;
 
         FeedContentTracker.Snapshot model = FeedContentTracker.current(decor);
+        PlaybackState.setContentAvailable(model != null);
+        if (model == null) {
+            // 离开信息流（搜索页、个人页等）后不要留下上次的图文标记。
+            PlaybackState.setPhotoContent(false);
+        }
         if (model != null) {
             PlaybackState.setPhotoContent(model.photoContent);
             if (PlaybackState.clearUserPauseForContentChange(model.aid)) {

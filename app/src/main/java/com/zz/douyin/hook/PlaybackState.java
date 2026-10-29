@@ -37,6 +37,7 @@ final class PlaybackState {
             new WeakReference<>(null);
 
     private static volatile boolean photoContent;
+    private static volatile boolean contentAvailable;
     private static volatile Object trackedPlayer;
     private static volatile long trackedDuration;
     private static volatile long lastPosition;
@@ -222,6 +223,19 @@ final class PlaybackState {
 
     static void setPhotoContent(boolean value) {
         photoContent = value;
+    }
+
+    static boolean isPhotoContent() {
+        return photoContent;
+    }
+
+    /** 当前界面是否还停留在可识别的内容上；搜索页、个人页等会回 false。 */
+    static void setContentAvailable(boolean value) {
+        contentAvailable = value;
+    }
+
+    static boolean isContentAvailable() {
+        return contentAvailable;
     }
 
     static int engineState(Object candidate) {

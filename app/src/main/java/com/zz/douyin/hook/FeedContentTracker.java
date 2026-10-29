@@ -14,6 +14,7 @@ import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -29,6 +30,15 @@ final class FeedContentTracker {
             Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Class<?>, Map<String, Field>> SERIALIZED_FIELDS =
             Collections.synchronizedMap(new WeakHashMap<>());
+    /** 图文字段候选：优先大图/原图，最后才是缩略图。 */
+    private static final String[] IMAGE_LABEL_FIELDS = {
+            "labelLarge",
+            "labelOrigin",
+            "origin",
+            "large",
+            "labelThumb",
+            "thumb"
+    };
 
     private static Class<?> panelClass;
     private static Method getCurrentAweme;
@@ -344,6 +354,8 @@ final class FeedContentTracker {
                 ad,
                 rawAd != null,
                 article != null,
+                images,
+                imageInfos,
                 imageCount,
                 imageInfoCount,
                 live,
@@ -496,6 +508,182 @@ final class FeedContentTracker {
         }
     }
 
+    /**
+     * 图文作品的图片地址：{@code images[].url_list} 是展示图（无水印），
+     * {@code image_infos[].label_large/label_origin} 是 40.x 起的大图与原始图。
+     * 带 {@code download} / {@code watermark} 字样的分支是客户端「保存」用的水印图，只在没有
+     * 其它候选时才兜底使用。
+     */
+    private static List<ImageUrl> resolveImageUrls(Object images, Object imageInfos) {
+        List<ImageUrl> output = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        appendImageUrls(output, seen, images, "images");
+        appendImageUrls(output, seen, imageInfos, "imageInfos");
+        return output.isEmpty()
+                ? Collections.emptyList()
+                : Collections.unmodifiableList(output);
+    }
+
+    private static void appendImageUrls(
+            List<ImageUrl> output,
+            Set<String> seen,
+            Object container,
+            String source
+    ) {
+        for (Object item : asIterable(container)) {
+            if (item == null) {
+                continue;
+            }
+            List<String> urls = pickImageUrls(item);
+            if (urls.isEmpty() || !seen.add(urls.get(0))) {
+                continue;
+            }
+            output.add(new ImageUrl(urls, source));
+        }
+    }
+
+    private static Iterable<?> asIterable(Object value) {
+        if (value instanceof Iterable<?> iterable) {
+            return iterable;
+        }
+        if (value != null && value.getClass().isArray()) {
+            int length = Array.getLength(value);
+            List<Object> copy = new ArrayList<>(length);
+            for (int index = 0; index < length; index++) {
+                copy.add(Array.get(value, index));
+            }
+            return copy;
+        }
+        return Collections.emptyList();
+    }
+
+    /** 一张图通常带多个镜像域名，按顺序全部保留，下载时逐个尝试。 */
+    private static List<String> pickImageUrls(Object image) {
+        for (String name : IMAGE_LABEL_FIELDS) {
+            List<String> urls = httpUrlsFrom(readNested(image, name));
+            if (!urls.isEmpty()) {
+                return urls;
+            }
+        }
+        List<String> direct = httpUrlsFrom(image);
+        if (!direct.isEmpty()) {
+            return direct;
+        }
+        return scanForHttpUrls(image, 0);
+    }
+
+    private static Object readNested(Object instance, String name) {
+        Class<?> type = instance.getClass();
+        Object value = readField(type, instance, name);
+        if (value != null) {
+            return value;
+        }
+        String snake = camelToSnake(name);
+        if (!snake.equals(name)) {
+            value = readSerializedField(instance, snake);
+            if (value != null) {
+                return value;
+            }
+        }
+        String suffix = name.substring(0, 1).toUpperCase() + name.substring(1);
+        return invokeNoArg(type, instance, "get" + suffix);
+    }
+
+    private static String camelToSnake(String name) {
+        StringBuilder builder = new StringBuilder(name.length() + 4);
+        for (int index = 0; index < name.length(); index++) {
+            char current = name.charAt(index);
+            if (Character.isUpperCase(current)) {
+                builder.append('_').append(Character.toLowerCase(current));
+            } else {
+                builder.append(current);
+            }
+        }
+        return builder.toString();
+    }
+
+    /** 从 UrlModel 结构（getUrlList/urlList/url_list）或裸字符串中取出所有 http 地址。 */
+    private static List<String> httpUrlsFrom(Object candidate) {
+        if (candidate == null) {
+            return Collections.emptyList();
+        }
+        if (candidate instanceof CharSequence text) {
+            String value = text.toString().trim();
+            return isHttpUrl(value) ? List.of(value) : Collections.emptyList();
+        }
+        Class<?> type = candidate.getClass();
+        Object urls = invokeNoArg(type, candidate, "getUrlList");
+        if (!(urls instanceof List<?>)) {
+            urls = readField(type, candidate, "urlList");
+        }
+        if (!(urls instanceof List<?>)) {
+            urls = readSerializedField(candidate, "url_list");
+        }
+        if (!(urls instanceof List<?> values)) {
+            return Collections.emptyList();
+        }
+        List<String> output = new ArrayList<>(values.size());
+        for (Object value : values) {
+            if (value instanceof CharSequence text) {
+                String url = text.toString().trim();
+                if (isHttpUrl(url)) {
+                    output.add(url);
+                }
+            }
+        }
+        return output;
+    }
+
+    private static boolean isHttpUrl(String value) {
+        return value.regionMatches(true, 0, "https://", 0, 8)
+                || value.regionMatches(true, 0, "http://", 0, 7);
+    }
+
+    private static List<String> scanForHttpUrls(Object value, int depth) {
+        if (value == null || depth > 2) {
+            return Collections.emptyList();
+        }
+        Class<?> type = value.getClass();
+        if (type.isPrimitive() || type.getName().startsWith("java.")) {
+            return Collections.emptyList();
+        }
+        List<String> fallback = Collections.emptyList();
+        for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+            for (Field field : current.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers())
+                        || field.getType().isPrimitive()) {
+                    continue;
+                }
+                Object child;
+                try {
+                    field.setAccessible(true);
+                    child = field.get(value);
+                } catch (ReflectiveOperationException | RuntimeException ignored) {
+                    continue;
+                }
+                if (child == null) {
+                    continue;
+                }
+                List<String> urls = httpUrlsFrom(child);
+                if (urls.isEmpty()) {
+                    urls = scanForHttpUrls(child, depth + 1);
+                }
+                if (urls.isEmpty()) {
+                    continue;
+                }
+                String fieldName = field.getName().toLowerCase();
+                if (fieldName.contains("download") || fieldName.contains("watermark")) {
+                    if (fallback.isEmpty()) {
+                        fallback = urls;
+                    }
+                    continue;
+                }
+                return urls;
+            }
+        }
+        return fallback;
+    }
+
     private static Object invokeNoArg(
             Class<?> type,
             Object instance,
@@ -565,6 +753,9 @@ final class FeedContentTracker {
         final String filterReason;
         final List<PlayUrl> playUrls;
         final String adMarkers;
+        private final Object images;
+        private final Object imageInfos;
+        private List<ImageUrl> imageUrls;
 
         Snapshot(
                 String aid,
@@ -573,6 +764,8 @@ final class FeedContentTracker {
                 boolean isAd,
                 boolean hasRawAd,
                 boolean hasArticle,
+                Object images,
+                Object imageInfos,
                 int imageCount,
                 int imageInfoCount,
                 boolean live,
@@ -592,6 +785,8 @@ final class FeedContentTracker {
             this.isAd = isAd;
             this.hasRawAd = hasRawAd;
             this.hasArticle = hasArticle;
+            this.images = images;
+            this.imageInfos = imageInfos;
             this.imageCount = imageCount;
             this.imageInfoCount = imageInfoCount;
             this.live = live;
@@ -612,6 +807,20 @@ final class FeedContentTracker {
 
         boolean hasDownloadUrl() {
             return !playUrls.isEmpty();
+        }
+
+        /**
+         * 图文图片地址按需解析：内容检查每秒会构造多个快照，反射遍历留到真正点击下载时再做。
+         */
+        synchronized List<ImageUrl> imageUrls() {
+            if (imageUrls == null) {
+                imageUrls = resolveImageUrls(images, imageInfos);
+            }
+            return imageUrls;
+        }
+
+        boolean hasImages() {
+            return !imageUrls().isEmpty();
         }
 
         boolean isAdvertisement() {
@@ -636,6 +845,21 @@ final class FeedContentTracker {
                     + " titleChars=" + title.length()
                     + " descChars=" + description.length()
                     + " playUrls=" + playUrls.size();
+        }
+    }
+
+    static final class ImageUrl {
+        /** 同一张图的多个镜像地址，按优先顺序排列。 */
+        final List<String> urls;
+        final String source;
+
+        ImageUrl(List<String> urls, String source) {
+            this.urls = Collections.unmodifiableList(new ArrayList<>(urls));
+            this.source = source;
+        }
+
+        String primary() {
+            return urls.get(0);
         }
     }
 

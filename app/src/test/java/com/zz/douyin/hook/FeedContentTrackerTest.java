@@ -261,6 +261,62 @@ public final class FeedContentTrackerTest {
         assertFalse(snapshot.shouldFilter());
     }
 
+    @Test
+    public void photoPostImagesExposeWatermarkFreeUrls() throws Exception {
+        FakeAweme aweme = videoAweme(2);
+        aweme.video = null;
+        aweme.images = List.of(
+                new FakeImage(List.of("https://p3.douyinpic.com/a.jpeg")),
+                new FakeImage(List.of("https://p3.douyinpic.com/b.jpeg"))
+        );
+
+        FeedContentTracker.Snapshot snapshot = snapshot(aweme);
+        List<FeedContentTracker.ImageUrl> urls = snapshot.imageUrls();
+
+        assertEquals(2, urls.size());
+        assertEquals("https://p3.douyinpic.com/a.jpeg", urls.get(0).primary());
+        assertEquals("https://p3.douyinpic.com/b.jpeg", urls.get(1).primary());
+        assertTrue(snapshot.hasImages());
+    }
+
+    @Test
+    public void imageInfosPreferLargeImageOverThumbnail() throws Exception {
+        FakeAweme aweme = videoAweme(2);
+        aweme.video = null;
+        aweme.images = Collections.emptyList();
+        aweme.imageInfos = List.of(new FakeImageInfo(
+                new FakeUrlModel(List.of("https://p3.douyinpic.com/large.jpeg")),
+                new FakeUrlModel(List.of("https://p3.douyinpic.com/thumb.jpeg"))
+        ));
+
+        List<FeedContentTracker.ImageUrl> urls = snapshot(aweme).imageUrls();
+
+        assertEquals(1, urls.size());
+        assertEquals("https://p3.douyinpic.com/large.jpeg", urls.get(0).primary());
+    }
+
+    @Test
+    public void watermarkedDownloadUrlsAreIgnoredWhenDisplayUrlsExist() throws Exception {
+        FakeAweme aweme = videoAweme(2);
+        aweme.video = null;
+        FakeImage image = new FakeImage(List.of("https://p3.douyinpic.com/clean.jpeg"));
+        image.downloadUrlList = List.of("https://p3.douyinpic.com/watermark.jpeg");
+        aweme.images = List.of(image);
+
+        List<FeedContentTracker.ImageUrl> urls = snapshot(aweme).imageUrls();
+
+        assertEquals(1, urls.size());
+        assertEquals("https://p3.douyinpic.com/clean.jpeg", urls.get(0).primary());
+    }
+
+    @Test
+    public void ordinaryVideoHasNoImageUrls() throws Exception {
+        FeedContentTracker.Snapshot snapshot = snapshot(videoAweme(0));
+
+        assertFalse(snapshot.hasImages());
+        assertTrue(snapshot.imageUrls().isEmpty());
+    }
+
     private static FakeAweme videoAweme(int awemeType) {
         FakeAweme aweme = new FakeAweme();
         aweme.aid = "test-" + awemeType;
@@ -335,6 +391,31 @@ public final class FeedContentTrackerTest {
 
         public List<String> getUrlList() {
             return urls;
+        }
+    }
+
+    public static final class FakeImage {
+        @SerializedName("url_list")
+        public List<String> urlList;
+
+        @SerializedName("download_url_list")
+        public List<String> downloadUrlList;
+
+        FakeImage(List<String> urls) {
+            this.urlList = urls;
+        }
+    }
+
+    public static final class FakeImageInfo {
+        @SerializedName("label_large")
+        public FakeUrlModel labelLarge;
+
+        @SerializedName("label_thumb")
+        public FakeUrlModel labelThumb;
+
+        FakeImageInfo(FakeUrlModel large, FakeUrlModel thumb) {
+            this.labelLarge = large;
+            this.labelThumb = thumb;
         }
     }
 }
