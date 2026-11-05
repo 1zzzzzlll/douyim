@@ -38,7 +38,7 @@
 | 默认作用域 | `com.ss.android.ugc.aweme` |
 | 模块包名 | `com.zz.douyin` |
 | 本次适配设备 | 抖音 41.0.0（versionCode 410001）／Android 17 |
-| 模块版本 | 1.7.1 |
+| 模块版本 | 1.7.3 |
 
 模块基于抖音 39.7.0 的运行时结构适配，并针对 40.5.0 补充双击拦截、40.8.0 补充弹幕分层、
 广告标记与图文渲染适配、40.9.0 补充图文图片下载、41.0.0 适配固定清晰度（模型类直挂 +
@@ -48,7 +48,7 @@
 ## 安装
 
 1. 从 [`dist`](dist) 目录下载最新版
-   [`douxianren-lsp-api102-v1.7.1.apk`](dist/douxianren-lsp-api102-v1.7.1.apk)。
+   [`douxianren-lsp-api102-v1.7.3.apk`](dist/douxianren-lsp-api102-v1.7.3.apk)。
 2. 在手机上安装 APK。
 3. 在 LSPosed 中启用“抖仙人”模块。
 4. 保持默认作用域“抖音”，然后强制停止并重新打开抖音。
@@ -59,7 +59,7 @@ LSPosed 中重新启用新包名模块并确认作用域。
 最新版 APK 的 SHA-256：
 
 ```text
-8291dfda1e40373fd765b010db5cb69cc6e9fa6fb0b3fdd707b8fcdeb09524f4
+fad5e48ee44dcd8eafbdc8cf947f73835f4983123debc07f846a6d7f561792fd
 ```
 
 ## 使用方式
@@ -101,9 +101,16 @@ LSPosed 中重新启用新包名模块并确认作用域。
   首次方法调用时把 `bitRate` 列表替换成目标档位并同步 `hitBitrate`，预加载与播放共用这一份
   钉死结果。三层数据一致，抖音无论因网络还是预加载都无法选到其他档位。
   档位识别优先用 `VideoInfo.mVHeight`／`SimVideoUrlModel` 条目的 `getVideoHeight()`，
-  缺失时依次解析 `mResolutionStr`／`mDefinition`／`mQualityDesc` 等字段，最后才退回
-  `mQualityType` 的粗略映射。所有反射步骤独立容错，任何一步失败都退回抖音原生行为；
-  日志输出每次钉死的可用档位与选择结果（`quality pinned`）。
+  缺失时依次解析 `mResolutionStr`／`mDefinition`／`mQualityDesc` 等分辨率字符串，
+  不做 `mQualityType` 粗映射兜底。DASH 视频的音轨条目（`mMediaType=1`、宽高为 0、
+  带误导性的 `mResolution="360p"` 字符串）会先被识别出来并原样保留、绝不参与档位
+  竞争或被查询替换——过滤音轨会导致 DASH 视频完全无声。所有反射步骤独立容错，
+  任何一步失败都退回抖音原生行为；日志输出每次钉死的可用档位与选择结果
+  （`quality pinned`，音轨条目显示为 `nonvideo/.../audio`）。
+- 1.7.3 修复部分 DASH 视频播放无声的问题：抖音 41.0 的 `VideoModel.getVideoInfoList()`
+  把音轨和视频档位混在同一列表里，音轨条目带 `mResolution="360p"` 字符串，旧版把它
+  误判成 360P 视频档位并按清晰度规则过滤掉，引擎拿到“无音轨”的列表就不会初始化音频
+  输出。现在按 `mMediaType` 区分音轨并保留，声音恢复正常。
 - 1.7.1 修复 41.0.0 上的两个问题：① 清晰度钩子从不触发——41.0 的 `MTTVideoEngine`
   继承自 `TTVideoEngine`，但预加载路径不经过 `setVideoModel`，改为模型类安装期直挂后
   生效；② 钩住 `SimVideoUrlModel.hashCode` 会在哈希表运算中递归重入导致启动 ANR，

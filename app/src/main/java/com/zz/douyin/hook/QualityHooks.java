@@ -32,10 +32,11 @@ import java.util.regex.Pattern;
  *   <li>进入模型时顺手关闭 {@code VideoRef.mEnableAdaptive}，抑制自适应标记。</li>
  * </ul>
  *
- * <p>清晰度档位的识别优先用 {@code VideoInfo.mVHeight}，缺失时依次从
- * {@code mResolutionStr}／{@code mDefinition}／{@code mQualityDesc} 等字符串解析，
- * 最后才退回 {@code mQualityType} 的粗略映射。所有反射步骤独立容错，
- * 任何一步失败都退回抖音原生行为，不影响播放。
+ * <p>清晰度档位的识别只认分辨率字段（{@code VideoInfo.mVHeight}）和分辨率
+ * 字符串（{@code mResolutionStr}／{@code mDefinition} 等），不做 qualityType
+ * 粗映射兜底——DASH 音轨条目也以 VideoInfo 形式混在列表里，粗映射会把音轨
+ * 误判成视频档位过滤掉，导致播放无声；高度解析不出来的条目一律原样保留。
+ * 所有反射步骤独立容错，任何一步失败都退回抖音原生行为，不影响播放。
  */
 final class QualityHooks {
     private static final String[] ENGINE_CLASSES = {
@@ -86,6 +87,81 @@ final class QualityHooks {
     private static volatile String qualitySetting = FilterPreferences.DEFAULT_VIDEO_QUALITY;
     private static volatile boolean moduleEnabled = true;
     private static volatile boolean guardLogged;
+
+    // -------------------------------------------------------------- 实机调试设施
+    // 通过 system property 动态开关各钉死分层，格式 "sim=0,list=1,query=0"，如：
+    //   adb shell setprop debug.dxr.quality "sim=0"
+    // 便于不重新构建安装就能二分定位问题层。
+    private static volatile long flagsReadAt;
+    private static volatile Map<String, Boolean> layerFlags;
+    private static volatile boolean flagsLogged;
+
+    private static boolean layerEnabled(String key) {
+        Map<String, Boolean> flags = layerFlags;
+        long now = System.currentTimeMillis();
+        if (flags == null || now - flagsReadAt > 1000) {
+            flags = readLayerFlags();
+            layerFlags = flags;
+            flagsReadAt = now;
+        }
+        Boolean enabled = flags.get(key);
+        return enabled == null || enabled;
+    }
+
+    private static Map<String, Boolean> readLayerFlags() {
+        Map<String, Boolean> out = new HashMap<>();
+        String raw = null;
+        try {
+            Method get = Class.forName("android.os.SystemProperties")
+                    .getMethod("get", String.class, String.class);
+            raw = (String) get.invoke(null, "debug.dxr.quality", "");
+        } catch (Throwable error) {
+            if (!flagsLogged) {
+                flagsLogged = true;
+                Log.w(DouyinModule.TAG, "quality flag prop unavailable", error);
+            }
+        }
+        if (raw != null && !raw.isEmpty()) {
+            for (String pair : raw.split("[,;\\s]+")) {
+                int eq = pair.indexOf('=');
+                if (eq <= 0) {
+                    continue;
+                }
+                out.put(pair.substring(0, eq), !"0".equals(pair.substring(eq + 1)));
+            }
+            if (!flagsLogged) {
+                flagsLogged = true;
+                Log.i(DouyinModule.TAG, "quality flags active: " + raw);
+            }
+        }
+        return out;
+    }
+
+    /** 文件转储计数与上限：写进抖音内部缓存，root 可读，绕开 logd 的丢失。 */
+    private static volatile int fileDumps;
+
+    /** 转储开关：默认关闭，通过 debug.dxr.quality "dump=1" 显式开启。 */
+    private static boolean dumpEnabled() {
+        layerEnabled("probe");
+        Map<String, Boolean> flags = layerFlags;
+        return flags != null && Boolean.TRUE.equals(flags.get("dump"));
+    }
+
+    private static void dumpLine(String line) {
+        if (fileDumps >= 400 || !dumpEnabled()) {
+            return;
+        }
+        fileDumps++;
+        try {
+            java.io.File file = new java.io.File(
+                    "/data/data/com.ss.android.ugc.aweme/cache/dxr_quality_dump.txt");
+            try (java.io.Writer writer = new java.io.FileWriter(file, true)) {
+                writer.write(System.currentTimeMillis() + " " + line + "\n");
+            }
+        } catch (Throwable ignored) {
+            // 文件诊断失败不影响功能。
+        }
+    }
 
     private QualityHooks() {
     }
@@ -143,6 +219,7 @@ final class QualityHooks {
         host.log(Log.INFO, DouyinModule.TAG,
                 "installed " + hooked + " video-quality entry hooks (setting="
                         + qualitySetting + ")");
+        dumpLine("INSTALL setting=" + qualitySetting);
     }
 
     /** SimVideoUrlModel 的无参方法都作为触发点：首次调用时把档位列表钉死到字段里。 */
@@ -165,7 +242,7 @@ final class QualityHooks {
                     .setId("douyin-quality-sim-" + method.toGenericString())
                     .setExceptionMode(DouyinModule.ExceptionMode.PROTECTIVE)
                     .intercept(chain -> {
-                        if (!IN_SIM_PIN.get()) {
+                        if (layerEnabled("sim") && !IN_SIM_PIN.get()) {
                             IN_SIM_PIN.set(Boolean.TRUE);
                             try {
                                 pinSimModelOnce(chain.getThisObject());
@@ -215,6 +292,10 @@ final class QualityHooks {
         }
 
         int target = targetHeight();
+        if (simDumpSamples < 10) {
+            simDumpSamples++;
+            logSimDump(model, variants);
+        }
         int bestHeight = -1;
         for (Object variant : variants) {
             int height = simEntryHeight(variant);
@@ -242,7 +323,10 @@ final class QualityHooks {
 
         List<Object> kept = new ArrayList<>();
         for (Object variant : variants) {
-            if (simEntryHeight(variant) == bestHeight) {
+            int height = simEntryHeight(variant);
+            // 高度解析不出来的条目（DASH 音轨等）必须原样保留，
+            // 丢掉它们会导致 DASH 音视频配对失败、播放无声。
+            if (height <= 0 || height == bestHeight) {
                 kept.add(variant);
             }
         }
@@ -250,15 +334,13 @@ final class QualityHooks {
             return;
         }
 
-        Object hit = pickSimHit(kept);
         try {
             bitRateField.set(model, new ArrayList<>(kept));
-            Field hitField = cachedField(model.getClass(), "hitBitrate");
-            // 列表项与 hitBitrate 字段类型不一致（如 DASH 条目）时跳过，
-            // bitRate 列表过滤本身就是主要钉死手段。
-            if (hit != null && hitField != null && hitField.getType().isInstance(hit)) {
-                hitField.set(model, hit);
-            }
+            // hitBitrate 与 hitDashVideoBitrate 的字段类型不同（普通条目与
+            // DASH 条目是两个混淆类），各自只在保留列表里找到同类型条目时
+            // 才同步，避免 DASH 场景音视频配对失效。
+            syncSimHitField(model, "hitBitrate", kept);
+            syncSimHitField(model, "hitDashVideoBitrate", kept);
         } catch (ReflectiveOperationException | RuntimeException error) {
             Log.w(DouyinModule.TAG, "quality sim pin failed", error);
             return;
@@ -268,19 +350,98 @@ final class QualityHooks {
             if (available.length() > 0) {
                 available.append(',');
             }
-            available.append(simEntryHeight(variant)).append('p');
+            int height = simEntryHeight(variant);
+            available.append(height > 0 ? height + "p" : "nonvideo");
         }
         Log.i(DouyinModule.TAG, "quality pinned(sim) target=" + describeTarget(target)
                 + " kept=" + bestHeight + "p variants=" + kept.size() + "/" + variants.size()
                 + " available=[" + available + "]");
     }
 
+    /**
+     * 把 Sim 模型的 hit 字段同步到保留列表里的最高码率条目。只考虑与字段
+     * 类型匹配的条目（bitRate 列表里普通条目与 DASH 条目类型不同），
+     * 找不到匹配就不动原值。
+     */
+    private static void syncSimHitField(Object model, String fieldName, List<Object> kept) {
+        Field field = cachedField(model.getClass(), fieldName);
+        if (field == null) {
+            return;
+        }
+        Object best = null;
+        int bestBitrate = Integer.MIN_VALUE;
+        for (Object candidate : kept) {
+            if (!field.getType().isInstance(candidate)) {
+                continue;
+            }
+            Object value = invokeNoArg(candidate, "getBitRate");
+            int bitrate = value instanceof Number number ? number.intValue() : Integer.MIN_VALUE;
+            if (bitrate > bestBitrate) {
+                bestBitrate = bitrate;
+                best = candidate;
+            }
+        }
+        if (best != null) {
+            try {
+                field.set(model, best);
+            } catch (ReflectiveOperationException | RuntimeException ignored) {
+                // 同步失败只影响 hit 预选，列表过滤仍然是主要钉死手段。
+            }
+        }
+    }
+
     private static int simEntryHeight(Object entry) {
+        if (mediaTypeOf(entry) != 0) {
+            return -1;
+        }
         Object value = invokeNoArg(entry, "getVideoHeight");
         if (value instanceof Integer height && height > 0) {
             return height;
         }
         return -1;
+    }
+
+    /** Sim 层诊断样本数。 */
+    private static volatile int simDumpSamples;
+
+    /** 诊断：打印 Sim 模型的条目类型与 DASH 相关字段，定位音视频配对。 */
+    private static void logSimDump(Object model, List<?> variants) {
+        StringBuilder entries = new StringBuilder();
+        int limit = Math.min(4, variants.size());
+        for (int index = 0; index < limit; index++) {
+            Object entry = variants.get(index);
+            entries.append(index).append(":cls=").append(entry.getClass().getName())
+                    .append(",br=").append(invokeNoArg(entry, "getBitRate"))
+                    .append(",h=").append(simEntryHeight(entry)).append(' ');
+        }
+        Log.i(DouyinModule.TAG, "quality sim dump: model=" + model.getClass().getName()
+                + " entries=[" + entries + "]"
+                + " hitBitrate=" + describeRef(model, "hitBitrate")
+                + " hitDashVideoBitrate=" + describeRef(model, "hitDashVideoBitrate")
+                + " hitDashAudioBitrate=" + describeRef(model, "hitDashAudioBitrate")
+                + " audioBitrate=" + describeRef(model, "audioBitrate")
+                + " dashVideoInfo=" + describeRef(model, "dashVideoInfo")
+                + " silentPlay=" + readField(model, "silentPlay"));
+        dumpLine("SIM model=" + model.getClass().getName()
+                + " entries=[" + entries + "]"
+                + " hitBitrate=" + describeRef(model, "hitBitrate")
+                + " hitDashVideoBitrate=" + describeRef(model, "hitDashVideoBitrate")
+                + " hitDashAudioBitrate=" + describeRef(model, "hitDashAudioBitrate")
+                + " audioBitrate=" + describeRef(model, "audioBitrate")
+                + " dashVideoInfo=" + describeRef(model, "dashVideoInfo")
+                + " silentPlay=" + readField(model, "silentPlay"));
+    }
+
+    private static String describeRef(Object model, String fieldName) {
+        Object value = readField(model, fieldName);
+        if (value == null) {
+            return "null";
+        }
+        String text = String.valueOf(value);
+        if (text.length() > 40) {
+            text = text.substring(0, 40) + "...";
+        }
+        return value.getClass().getSimpleName() + "(" + text + ")";
     }
 
     /** 按类与字段名缓存查找：键是 Class 对象，其 hashCode 不在挂钩范围内。 */
@@ -304,21 +465,6 @@ final class QualityHooks {
                     .put(name, field);
         }
         return field;
-    }
-
-    /** 同一清晰度多个变体时，选码率最高的作为 hitBitrate。 */
-    private static Object pickSimHit(List<Object> kept) {
-        Object best = null;
-        int bestBitrate = Integer.MIN_VALUE;
-        for (Object candidate : kept) {
-            Object value = invokeNoArg(candidate, "getBitRate");
-            int bitrate = value instanceof Integer number ? number : Integer.MIN_VALUE;
-            if (bitrate > bestBitrate) {
-                bestBitrate = bitrate;
-                best = candidate;
-            }
-        }
-        return best;
     }
 
     private static void readPreferences(SharedPreferences preferences) {
@@ -494,6 +640,7 @@ final class QualityHooks {
         }
 
         int count = 0;
+        StringBuilder names = new StringBuilder();
         for (Class<?> current = type; current != null && current != Object.class;
                 current = current.getSuperclass()) {
             for (Method method : current.getDeclaredMethods()) {
@@ -507,14 +654,17 @@ final class QualityHooks {
                     if ("getVideoInfoList".equals(name) && method.getParameterCount() == 0) {
                         hookVideoInfoList(method);
                         count++;
+                        names.append(name).append(' ');
                     } else if ("getSupportResolutions".equals(name)
                             && method.getParameterCount() == 0
                             && method.getReturnType().isArray()) {
                         hookSupportResolutions(method);
                         count++;
+                        names.append(name).append(' ');
                     } else if (method.getReturnType() == videoInfoType) {
                         hookVideoInfoQuery(method);
                         count++;
+                        names.append(name).append(' ');
                     }
                 } catch (Throwable error) {
                     host.log(Log.WARN, DouyinModule.TAG,
@@ -523,11 +673,14 @@ final class QualityHooks {
             }
         }
         Log.i(DouyinModule.TAG,
-                "quality model hooks installed: " + type.getName() + " (" + count + ")");
+                "quality model hooks installed: " + type.getName() + " (" + count + ")"
+                        + " methods=[" + names + "]");
     }
 
     /** 模型档位查询的样本数：前几次把可用档位打出来，便于实机诊断。 */
     private static volatile int querySamples;
+    /** 全字段转储的样本数。 */
+    private static volatile int dumpSamples;
 
     private static void hookVideoInfoList(Method method) {
         module.hook(method)
@@ -543,7 +696,15 @@ final class QualityHooks {
                         Log.i(DouyinModule.TAG, describeVariants(
                                 chain.getThisObject(), original));
                     }
-                    if (original.size() < 2) {
+                    if (dumpSamples < 8) {
+                        dumpSamples++;
+                        dumpLine("MODEL " + dumpFields(chain.getThisObject()));
+                        int limit = Math.min(6, original.size());
+                        for (int index = 0; index < limit; index++) {
+                            dumpLine("ENTRY" + index + " " + dumpFields(original.get(index)));
+                        }
+                    }
+                    if (original.size() < 2 || !layerEnabled("list")) {
                         return result;
                     }
                     List<Object> pinned = ensurePinned(chain.getThisObject(), original);
@@ -558,7 +719,11 @@ final class QualityHooks {
             if (heights.length() > 0) {
                 heights.append(',');
             }
-            heights.append(heightOf(variant)).append('p');
+            int height = videoHeightOf(variant);
+            String codec = stringField(variant, "mCodecType");
+            heights.append(height > 0 ? height + "p" : "nonvideo")
+                    .append(codec == null ? "" : "/" + codec)
+                    .append(mediaTypeOf(variant) != 0 ? "/audio" : "");
         }
         return "quality model queried: class=" + model.getClass().getName()
                 + " variants=" + variants.size() + " heights=[" + heights + "]"
@@ -571,7 +736,8 @@ final class QualityHooks {
                 .setExceptionMode(DouyinModule.ExceptionMode.PROTECTIVE)
                 .intercept(chain -> {
                     Object result = chain.proceed();
-                    if (!(result instanceof Object[] original) || original.length < 2) {
+                    if (!(result instanceof Object[] original) || original.length < 2
+                            || !layerEnabled("res")) {
                         return result;
                     }
                     Object model = chain.getThisObject();
@@ -585,20 +751,34 @@ final class QualityHooks {
                 });
     }
 
+    /** 查询替换的日志样本数。 */
+    private static volatile int replaceSamples;
+
     private static void hookVideoInfoQuery(Method method) {
+        final String name = method.getName();
         module.hook(method)
                 .setId("douyin-quality-info-" + method.toGenericString())
                 .setExceptionMode(DouyinModule.ExceptionMode.PROTECTIVE)
                 .intercept(chain -> {
                     Object result = chain.proceed();
-                    if (result == null) {
-                        return null;
+                    if (result == null || !layerEnabled("query")) {
+                        return result;
                     }
                     List<Object> pinned = pinnedOf(chain.getThisObject());
                     if (pinned == null || pinned.isEmpty() || pinned.contains(result)) {
                         return result;
                     }
                     Object replacement = pickReplacement(pinned, result);
+                    if (replacement != result) {
+                        if (replaceSamples < 40) {
+                            replaceSamples++;
+                            Log.i(DouyinModule.TAG, "quality query replaced: " + name
+                                    + " from=[" + describeInfo(result) + "]"
+                                    + " to=[" + describeInfo(replacement) + "]");
+                        }
+                        dumpLine("REPLACE " + name + " from=[" + describeInfo(result)
+                                + "] to=[" + describeInfo(replacement) + "]");
+                    }
                     return replacement == null ? result : replacement;
                 });
     }
@@ -650,12 +830,25 @@ final class QualityHooks {
             if (available.length() > 0) {
                 available.append(',');
             }
-            available.append(heightOf(variant)).append('p');
+            int height = videoHeightOf(variant);
+            String codec = stringField(variant, "mCodecType");
+            available.append(height > 0 ? height + "p" : "nonvideo")
+                    .append(codec == null ? "" : "/" + codec)
+                    .append(mediaTypeOf(variant) != 0 ? "/audio" : "");
         }
-        Object sample = pinned.get(0);
+        Object sample = null;
+        for (Object variant : pinned) {
+            if (!isNonVideoStream(variant)) {
+                sample = variant;
+                break;
+            }
+        }
+        if (sample == null) {
+            sample = pinned.get(0);
+        }
         String codec = stringField(sample, "mCodecType");
         return "quality pinned target=" + describeTarget(target)
-                + " kept=" + heightOf(sample) + "p"
+                + " kept=" + videoHeightOf(sample) + "p"
                 + (codec == null ? "" : "/" + codec)
                 + " variants=" + pinned.size() + "/" + original.size()
                 + " available=[" + available + "]";
@@ -684,6 +877,10 @@ final class QualityHooks {
      * 从原始档位里挑出目标清晰度：优先精确匹配；没有就取不高于目标的最大档；
      * 再没有（视频最高清晰度低于目标）就取可用的最低档。同一清晰度保留全部
      * 编码／帧率变体，编码选择仍交给引擎。
+     *
+     * <p>DASH 模式下音轨也会以 {@code VideoInfo} 形式混在列表里（mVHeight 为 0、
+     * 编码为 aac/opus 等）。音轨条目一律原样保留，绝不参与档位竞争——
+     * 过滤掉它们会导致视频完全无声。
      */
     private static List<Object> computePinned(List<?> variants) {
         int target = targetHeight();
@@ -692,9 +889,13 @@ final class QualityHooks {
         }
 
         // 选择档位：精确匹配 > 不高于目标的最大档 > 高于目标的最小档。
+        // 只有明确是视频流（能解析出高度且不是音频编码）的条目参与竞争。
         int bestHeight = -1;
         for (Object variant : variants) {
-            int height = heightOf(variant);
+            if (isNonVideoStream(variant)) {
+                continue;
+            }
+            int height = videoHeightOf(variant);
             if (height <= 0) {
                 continue;
             }
@@ -719,7 +920,7 @@ final class QualityHooks {
 
         List<Object> kept = new ArrayList<>();
         for (Object variant : variants) {
-            if (heightOf(variant) == bestHeight) {
+            if (isNonVideoStream(variant) || videoHeightOf(variant) == bestHeight) {
                 kept.add(variant);
             }
         }
@@ -731,7 +932,17 @@ final class QualityHooks {
 
     /** 引擎想要的档位不在钉死集合里时，挑一个同编码、同清晰度的替代品。 */
     private static Object pickReplacement(List<Object> pinned, Object requested) {
+        // 引擎要的是音轨等非视频条目时绝不能换成视频档位，否则音频管线
+        // 拿到视频流就不会创建音频解码器，表现为完全无声。
+        if (isNonVideoStream(requested)) {
+            return requested;
+        }
         String codec = stringField(requested, "mCodecType");
+        // 编码不明的查询结果很可能是 DASH 音轨（字段布局与视频条目相同、
+        // 高度继承自视频轨），替换它会弄丢音频流，宁可放过不替换。
+        if (!isVideoCodec(codec)) {
+            return requested;
+        }
         Object best = null;
         int bestBitrate = Integer.MIN_VALUE;
         for (Object candidate : pinned) {
@@ -750,6 +961,9 @@ final class QualityHooks {
     private static Object resolutionsOf(List<Object> pinned, Class<?> componentType) {
         List<Object> distinct = new ArrayList<>();
         for (Object variant : pinned) {
+            if (isNonVideoStream(variant)) {
+                continue;
+            }
             Object resolution = readField(variant, "mResolution");
             if (resolution == null || distinct.contains(resolution)) {
                 continue;
@@ -768,7 +982,107 @@ final class QualityHooks {
 
     // ------------------------------------------------------------------ 档位识别
 
-    private static int heightOf(Object variant) {
+    /**
+     * 判断条目是否不是可钉死的视频档位：DASH 模式下音轨会以 VideoInfo 的形式
+     * 出现在档位列表里（{@code mMediaType=1}、mVHeight/mVWidth 为 0，且带着
+     * "360p" 的 mResolution 字符串）。识别依据按可信度排列：mMediaType >
+     * 音频编码字符串 > 高度完全解析不出来。判定为非视频的条目一律原样保留
+     * 且不被替换，否则会被当成 360P 档位过滤掉，导致视频完全无声。
+     */
+    private static boolean isNonVideoStream(Object variant) {
+        if (mediaTypeOf(variant) != 0) {
+            return true;
+        }
+        if (isAudioCodec(stringField(variant, "mCodecType"))) {
+            return true;
+        }
+        return videoHeightOf(variant) <= 0;
+    }
+
+    /** 媒体类型：0=视频，1=音轨（DASH）。读不出时按 0（视频）处理。 */
+    private static int mediaTypeOf(Object variant) {
+        Object value = readField(variant, "mMediaType");
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        return 0;
+    }
+
+    /** 常见音频编码关键字；VideoInfo 的 mCodecType 对音轨是 aac/mp4a/opus 等。 */
+    private static boolean isAudioCodec(String codec) {
+        if (codec == null || codec.isEmpty()) {
+            return false;
+        }
+        String lower = codec.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("aac") || lower.contains("mp4a") || lower.contains("opus")
+                || lower.contains("ac-3") || lower.contains("ec-3")
+                || lower.contains("flac") || lower.contains("audio");
+    }
+
+    /** 明确的视频编码关键字；只有编码可确认是视频时才允许替换查询结果。 */
+    private static boolean isVideoCodec(String codec) {
+        if (codec == null || codec.isEmpty()) {
+            return false;
+        }
+        String lower = codec.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("h264") || lower.contains("h265") || lower.contains("h266")
+                || lower.contains("avc") || lower.contains("hevc")
+                || lower.contains("av1") || lower.contains("bytevc");
+    }
+
+    /** 诊断：把一个条目的关键字段拼成可读字符串。 */
+    private static String describeInfo(Object info) {
+        if (info == null) {
+            return "null";
+        }
+        return "cls=" + info.getClass().getSimpleName()
+                + " h=" + videoHeightOf(info)
+                + " codec=" + stringField(info, "mCodecType")
+                + " br=" + intOrMin(info, "mBitrate", "mBitrateVer2")
+                + " qtype=" + intField(info, "mQualityType")
+                + " def=" + stringField(info, "mDefinition");
+    }
+
+    /** 诊断：反射打印对象的全部实例字段（截断长值），用于看清条目真实布局。 */
+    private static String dumpFields(Object obj) {
+        if (obj == null) {
+            return "null";
+        }
+        StringBuilder out = new StringBuilder(obj.getClass().getName()).append(" {");
+        for (Class<?> type = obj.getClass(); type != null && type != Object.class;
+                type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers())) {
+                    continue;
+                }
+                try {
+                    field.setAccessible(true);
+                    String value = String.valueOf(field.get(obj));
+                    if (value.length() > 50) {
+                        value = value.substring(0, 50) + "...";
+                    }
+                    out.append(field.getName()).append('=').append(value).append(' ');
+                    if (out.length() > 1800) {
+                        return out.append("...TRUNC}").toString();
+                    }
+                } catch (Throwable ignored) {
+                    // 诊断专用，读不出的字段直接跳过。
+                }
+            }
+        }
+        return out.append('}').toString();
+    }
+
+    /**
+     * 视频条目的“确凿”高度：只认分辨率字段和分辨率字符串，不做
+     * {@code mQualityType} 粗映射兜底——音轨条目常带 qualityType 与 "360p"
+     * 的 mResolution 字符串，兜底映射会把它误判成 360P 视频档而被过滤掉，
+     * 导致无声。音轨（mMediaType!=0）直接返回 -1。
+     */
+    private static int videoHeightOf(Object variant) {
+        if (mediaTypeOf(variant) != 0) {
+            return -1;
+        }
         Integer height = intField(variant, "mVHeight");
         if (height == null || height <= 0) {
             height = intField(variant, "mVHeightVer2");
@@ -797,8 +1111,7 @@ final class QualityHooks {
                 return parsed;
             }
         }
-        Integer qualityType = intField(variant, "mQualityType");
-        return qualityType == null ? -1 : qualityTypeToHeight(qualityType);
+        return -1;
     }
 
     private static int parseHeight(String value) {
@@ -836,37 +1149,9 @@ final class QualityHooks {
         return -1;
     }
 
-    /**
-     * 抖音 quality_type 的粗略映射，只在拿不到实际分辨率时兜底：
-     * 5=360p、10=480p、15=540p、20/21=720p、25/26=1080p、30=2K、40+=4K。
-     */
-    private static int qualityTypeToHeight(int qualityType) {
-        switch (qualityType) {
-            case 5:
-                return 360;
-            case 10:
-                return 480;
-            case 15:
-                return 540;
-            case 20:
-            case 21:
-                return 720;
-            case 25:
-            case 26:
-                return 1080;
-            case 30:
-                return 1440;
-            case 40:
-            case 45:
-                return 2160;
-            default:
-                return -1;
-        }
-    }
-
     /** 关掉 VideoRef 上的自适应标记，尽力而为，失败不影响主流程。 */
     private static void disableAdaptive(Object model) {
-        if (!enforcing()) {
+        if (!enforcing() || !layerEnabled("adaptive")) {
             return;
         }
         for (String refField : new String[]{"videoRef", "vodVideoRef"}) {
