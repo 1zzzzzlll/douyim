@@ -73,7 +73,10 @@ final class VideoDownloader {
         // 无效数据，所以图文只给图片入口。
         boolean photo = snapshot != null && snapshot.photoContent;
         if (!photo && snapshot != null && snapshot.hasDownloadUrl()) {
-            labels.add("视频（无水印 MP4）");
+            String quality = snapshot.downloadQualityLabel();
+            labels.add("视频（无水印 MP4"
+                    + (quality.isEmpty() ? "" : " · " + quality)
+                    + "）");
             kinds.add(Kind.VIDEO);
             labels.add("音频（MP3）");
             kinds.add(Kind.AUDIO);

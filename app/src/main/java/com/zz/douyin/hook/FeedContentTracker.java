@@ -456,23 +456,36 @@ final class FeedContentTracker {
         if (video == null) {
             return Collections.emptyList();
         }
-        List<PlayUrl> urls = new ArrayList<>();
+        List<PlayUrl> primary = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
-        appendPlayUrls(urls, seen, video, "play_addr");
-        appendPlayUrls(urls, seen, video, "play_addr_h264");
-        appendPlayUrls(urls, seen, video, "play_addr_bytevc1");
-        return urls.isEmpty()
+        appendPlayUrls(primary, seen, video, "play_addr", "play_addr");
+        appendPlayUrls(primary, seen, video, "play_addr_h264", "play_addr_h264");
+        appendPlayUrls(primary, seen, video, "play_addr_bytevc1", "play_addr_bytevc1");
+        // 清晰度为“自动”时保持原有顺序；钉死档位时把目标码率地址排到最前。
+        String quality = FilterPreferences.readVideoQuality(filterPreferences);
+        if (FilterPreferences.QUALITY_AUTO.equals(quality)) {
+            return primary.isEmpty()
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(primary);
+        }
+        List<PlayUrl> ordered = orderPlayUrlsByQuality(
+                primary,
+                collectGears(video, seen),
+                quality
+        );
+        return ordered.isEmpty()
                 ? Collections.emptyList()
-                : Collections.unmodifiableList(urls);
+                : Collections.unmodifiableList(ordered);
     }
 
     private static void appendPlayUrls(
             List<PlayUrl> output,
             Set<String> seen,
             Object video,
-            String source
+            String field,
+            String label
     ) {
-        Object address = readSerializedField(video, source);
+        Object address = readSerializedField(video, field);
         if (address == null) {
             return;
         }
@@ -485,8 +498,176 @@ final class FeedContentTracker {
             return;
         }
 
-        appendUrlsWithScheme(output, seen, candidates, source, "https://");
-        appendUrlsWithScheme(output, seen, candidates, source, "http://");
+        appendUrlsWithScheme(output, seen, candidates, label, "https://");
+        appendUrlsWithScheme(output, seen, candidates, label, "http://");
+    }
+
+    /**
+     * 下载地址按配置清晰度排序：目标档位（精确 > 不超过目标的最大档 > 高于目标的最小档，
+     * 与播放钉死规则一致）排最前，原有顶层地址兜底，其余档位按与目标的差距排后。
+     */
+    private static List<PlayUrl> orderPlayUrlsByQuality(
+            List<PlayUrl> primary,
+            List<Gear> gears,
+            String quality
+    ) {
+        if (gears.isEmpty()) {
+            return primary;
+        }
+        int chosen = chooseGearHeight(gears, downloadTargetHeight(quality));
+        if (chosen <= 0) {
+            return primary;
+        }
+        List<PlayUrl> ordered = new ArrayList<>();
+        for (Gear gear : gears) {
+            if (gear.height == chosen) {
+                ordered.addAll(gear.urls);
+            }
+        }
+        ordered.addAll(primary);
+        List<Gear> rest = new ArrayList<>();
+        for (Gear gear : gears) {
+            if (gear.height != chosen) {
+                rest.add(gear);
+            }
+        }
+        rest.sort((left, right) -> {
+            int leftDistance = Math.abs(left.height - chosen);
+            int rightDistance = Math.abs(right.height - chosen);
+            if (leftDistance != rightDistance) {
+                return Integer.compare(leftDistance, rightDistance);
+            }
+            return Long.compare(right.bitrate, left.bitrate);
+        });
+        for (Gear gear : rest) {
+            ordered.addAll(gear.urls);
+        }
+        Log.d(DouyinModule.TAG, "download urls ordered by quality: setting="
+                + quality + " chosen=" + chosen + "p gears=" + describeGears(gears));
+        return ordered;
+    }
+
+    /** video.bit_rate[] 里的码率档位，每项带 gear_name 与各自的 play_addr。 */
+    private static List<Gear> collectGears(Object video, Set<String> seen) {
+        Object bitRates = readSerializedField(video, "bit_rate");
+        if (bitRates == null) {
+            bitRates = readField(video.getClass(), video, "bitRate");
+        }
+        List<Gear> gears = new ArrayList<>();
+        for (Object item : asIterable(bitRates)) {
+            if (item == null) {
+                continue;
+            }
+            int height = gearHeight(item);
+            if (height <= 0) {
+                continue;
+            }
+            String label = "bit_rate:" + height + "p";
+            List<PlayUrl> urls = new ArrayList<>();
+            appendPlayUrls(urls, seen, item, "play_addr", label);
+            appendPlayUrls(urls, seen, item, "play_addr_h264", label);
+            appendPlayUrls(urls, seen, item, "play_addr_bytevc1", label);
+            if (urls.isEmpty()) {
+                continue;
+            }
+            gears.add(new Gear(height, gearBitrate(item), urls));
+        }
+        gears.sort((left, right) -> {
+            if (left.height != right.height) {
+                return Integer.compare(right.height, left.height);
+            }
+            return Long.compare(right.bitrate, left.bitrate);
+        });
+        return gears;
+    }
+
+    private static int downloadTargetHeight(String quality) {
+        if (FilterPreferences.QUALITY_MAX.equals(quality)) {
+            return Integer.MAX_VALUE;
+        }
+        try {
+            return Integer.parseInt(quality);
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
+    }
+
+    /** 选档规则与播放钉死一致：精确匹配 > 不超过目标的最大档 > 高于目标的最小档。 */
+    private static int chooseGearHeight(List<Gear> gears, int target) {
+        if (target <= 0) {
+            return -1;
+        }
+        int below = -1;
+        int above = -1;
+        for (Gear gear : gears) {
+            int height = gear.height;
+            if (height == target) {
+                return target;
+            }
+            if (height < target && height > below) {
+                below = height;
+            }
+            if (height > target && (above < 0 || height < above)) {
+                above = height;
+            }
+        }
+        return below > 0 ? below : above;
+    }
+
+    private static int gearHeight(Object gear) {
+        Object name = readSerializedField(gear, "gear_name");
+        if (name == null) {
+            name = readField(gear.getClass(), gear, "gearName");
+        }
+        if (name instanceof CharSequence text) {
+            int height = heightFromGearName(text.toString());
+            if (height > 0) {
+                return height;
+            }
+        }
+        Object height = readSerializedField(gear, "height");
+        if (height == null) {
+            height = readField(gear.getClass(), gear, "height");
+        }
+        return height instanceof Number number ? number.intValue() : 0;
+    }
+
+    /** gear_name 形如 normal_1080_0 / adapt_lower_540_1，取第一个落在常见高度区间的数字段。 */
+    private static int heightFromGearName(String gearName) {
+        for (String part : gearName.split("[^0-9]+")) {
+            if (part.isEmpty()) {
+                continue;
+            }
+            int value;
+            try {
+                value = Integer.parseInt(part);
+            } catch (NumberFormatException ignored) {
+                continue;
+            }
+            if (value >= 144 && value <= 4320) {
+                return value;
+            }
+        }
+        return 0;
+    }
+
+    private static long gearBitrate(Object gear) {
+        Object bitrate = readSerializedField(gear, "bit_rate");
+        if (bitrate == null) {
+            bitrate = readField(gear.getClass(), gear, "bitrate");
+        }
+        return bitrate instanceof Number number ? number.longValue() : 0L;
+    }
+
+    private static String describeGears(List<Gear> gears) {
+        StringBuilder builder = new StringBuilder("[");
+        for (int index = 0; index < gears.size(); index++) {
+            builder.append(gears.get(index).height).append('p');
+            if (index < gears.size() - 1) {
+                builder.append(',');
+            }
+        }
+        return builder.append(']').toString();
     }
 
     private static void appendUrlsWithScheme(
@@ -827,6 +1008,18 @@ final class FeedContentTracker {
             return isAd || hasRawAd;
         }
 
+        /** 下载将优先使用的清晰度（来自码率档位标签），没有时为空串。 */
+        String downloadQualityLabel() {
+            if (playUrls.isEmpty()) {
+                return "";
+            }
+            String source = playUrls.get(0).source;
+            String prefix = "bit_rate:";
+            return source.startsWith(prefix)
+                    ? source.substring(prefix.length())
+                    : "";
+        }
+
         String classificationDetails() {
             return "aid=" + aid
                     + " type=" + awemeType
@@ -870,6 +1063,19 @@ final class FeedContentTracker {
         PlayUrl(String url, String source) {
             this.url = url;
             this.source = source;
+        }
+    }
+
+    /** video.bit_rate[] 里的一个码率档位：高度、码率与该档位的下载地址。 */
+    private static final class Gear {
+        final int height;
+        final long bitrate;
+        final List<PlayUrl> urls;
+
+        Gear(int height, long bitrate, List<PlayUrl> urls) {
+            this.height = height;
+            this.bitrate = bitrate;
+            this.urls = Collections.unmodifiableList(new ArrayList<>(urls));
         }
     }
 }

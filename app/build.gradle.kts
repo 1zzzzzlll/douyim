@@ -14,8 +14,8 @@ android {
         applicationId = "com.zz.douyin"
         minSdk = 28
         targetSdk = 35
-        versionCode = 26
-        versionName = "1.7.4"
+        versionCode = 27
+        versionName = "1.7.5"
     }
 
     buildTypes {
@@ -43,6 +43,12 @@ android {
         resources {
             merges += "META-INF/xposed/*"
             excludes += "**"
+        }
+    }
+
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
         }
     }
 
