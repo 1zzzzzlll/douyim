@@ -21,7 +21,7 @@ public final class DouyinModule extends XposedModule {
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
-        log(Log.INFO, TAG, "module 1.6.0 loaded in " + param.getProcessName()
+        log(Log.INFO, TAG, "module 1.7.1 loaded in " + param.getProcessName()
                 + ", framework=" + getFrameworkName()
                 + ", api=" + getApiVersion());
     }
@@ -68,6 +68,15 @@ public final class DouyinModule extends XposedModule {
         installSubsystem(
                 "player tracker",
                 () -> PlayerHooks.install(this, param.getClassLoader())
+        );
+        installSubsystem(
+                "video quality guard",
+                () -> {
+                    SharedPreferences preferences = getRemotePreferences(
+                            com.zz.douyin.FilterPreferences.NAME
+                    );
+                    QualityHooks.install(this, param.getClassLoader(), preferences);
+                }
         );
         log(Log.INFO, TAG, "hook installation finished for " + param.getPackageName());
     }

@@ -20,6 +20,8 @@
 - 暂停后在右侧操作栏顶部显示半透明下载按钮：普通视频可选择“视频（无水印 MP4）”或
   “音频（MP3）”，图文作品可选择“图片（无水印）”，全部保存到系统 `Download` 目录。
 - 可在模块设置页分别配置是否跳过广告、图文、直播和普通视频。
+- 可选“视频清晰度”：固定每个视频播放的清晰度（自动／360P／480P／540P／720P／1080P／2K／4K／最高），
+  选定后抖音不再根据网络或其他条件自动升降清晰度档位；视频没有该档位时就近选择。
 - 支持按关键词匹配普通视频的标题或介绍，命中后自动切换到下一条；关键词忽略英文大小写，
   可使用换行、逗号或分号分隔。
 - 默认跳过广告、图文和直播，保留普通视频；关键词默认为空。
@@ -35,17 +37,18 @@
 | Android | 9（API 28）及以上 |
 | 默认作用域 | `com.ss.android.ugc.aweme` |
 | 模块包名 | `com.zz.douyin` |
-| 本次适配设备 | 抖音 40.9.0（versionCode 400901）／Android 17 |
-| 模块版本 | 1.6.1 |
+| 本次适配设备 | 抖音 41.0.0（versionCode 410001）／Android 17 |
+| 模块版本 | 1.7.1 |
 
 模块基于抖音 39.7.0 的运行时结构适配，并针对 40.5.0 补充双击拦截、40.8.0 补充弹幕分层、
-广告标记与图文渲染适配、40.9.0 补充图文图片下载。抖音升级后，播放器类、数据模型或界面层级
+广告标记与图文渲染适配、40.9.0 补充图文图片下载、41.0.0 适配固定清晰度（模型类直挂 +
+预加载层钉死）。抖音升级后，播放器类、数据模型或界面层级
 可能变化，届时需要重新适配。
 
 ## 安装
 
 1. 从 [`dist`](dist) 目录下载最新版
-   [`douxianren-lsp-api102-v1.6.1.apk`](dist/douxianren-lsp-api102-v1.6.1.apk)。
+   [`douxianren-lsp-api102-v1.7.1.apk`](dist/douxianren-lsp-api102-v1.7.1.apk)。
 2. 在手机上安装 APK。
 3. 在 LSPosed 中启用“抖仙人”模块。
 4. 保持默认作用域“抖音”，然后强制停止并重新打开抖音。
@@ -56,7 +59,7 @@ LSPosed 中重新启用新包名模块并确认作用域。
 最新版 APK 的 SHA-256：
 
 ```text
-7489fb94441be8d0dc64bb84b80c5bc9eedb5ea4ae91d560a539c57ff5b2eb77
+8291dfda1e40373fd765b010db5cb69cc6e9fa6fb0b3fdd707b8fcdeb09524f4
 ```
 
 ## 使用方式
@@ -73,6 +76,9 @@ LSPosed 中重新启用新包名模块并确认作用域。
   隐藏的点赞、评论、收藏、分享、导航等按钮不会响应点击，暂停恢复界面后可正常使用。
 - 打开“抖仙人”应用，可分别开关播放弹幕，以及广告、图文、直播和视频过滤；设置通过
   LSPosed Remote Preferences 同步到抖音进程。
+- “视频清晰度”默认为“自动”，即抖音原生行为。选择具体档位后，每个视频按该清晰度播放：
+  优先精确匹配，没有该档位时选不高于它的最大档，再没有就选可用的最低档；“最高”始终选
+  当前视频支持的最高清晰度。修改后从下一条视频起生效，播放中的视频不强制重载。
 - 在“视频关键词”中填写不想观看的词语并保存，普通视频的 `item_title`、`title` 或 `desc`
   包含任意关键词时会自动跳过。
 - 点击“下载”按钮选择视频、音频或图片。音频从当前视频的完整音轨解码为 PCM 后编码为 MP3，
@@ -86,6 +92,22 @@ LSPosed 中重新启用新包名模块并确认作用域。
 
 - 播放状态通过 `TTVideoEngine`、`TTVideoEngineImplV2` 及其
   `VideoEngineListener` 回调进行跟踪。
+- 清晰度锁定分两层实现。引擎层：`TTVideoEngine.setVideoModel` 等模型入口把
+  `VideoModel` 交给引擎后，模块把 `getVideoInfoList`、`getSupportResolutions` 及所有返回
+  `VideoInfo` 的查询（含混淆名方法）统一钉到目标清晰度对应的档位，并尽量保持引擎原本
+  要求的编码格式，同时关闭 `VideoRef.mEnableAdaptive`。模型层：`VideoModel` 类在安装期
+  直接挂钩，不依赖引擎入口触发（抖音 41.0 的预加载路径不再调用 `setVideoModel`，只有
+  直接挂钩才能覆盖）。应用层：预加载的画质在 `SimVideoUrlModel` 里就被预选，模块在其
+  首次方法调用时把 `bitRate` 列表替换成目标档位并同步 `hitBitrate`，预加载与播放共用这一份
+  钉死结果。三层数据一致，抖音无论因网络还是预加载都无法选到其他档位。
+  档位识别优先用 `VideoInfo.mVHeight`／`SimVideoUrlModel` 条目的 `getVideoHeight()`，
+  缺失时依次解析 `mResolutionStr`／`mDefinition`／`mQualityDesc` 等字段，最后才退回
+  `mQualityType` 的粗略映射。所有反射步骤独立容错，任何一步失败都退回抖音原生行为；
+  日志输出每次钉死的可用档位与选择结果（`quality pinned`）。
+- 1.7.1 修复 41.0.0 上的两个问题：① 清晰度钩子从不触发——41.0 的 `MTTVideoEngine`
+  继承自 `TTVideoEngine`，但预加载路径不经过 `setVideoModel`，改为模型类安装期直挂后
+  生效；② 钩住 `SimVideoUrlModel.hashCode` 会在哈希表运算中递归重入导致启动 ANR，
+  现已排除并加重入守卫。
 - 视频地址依次从 `play_addr`、`play_addr_h264`、`play_addr_bytevc1` 中选择，
   不使用带水印的下载地址链。
 - 广告按当前视频数据模型中的广告字段识别：`isAd`、`awemeRawAd`、`adAwemeSource`、
@@ -208,6 +230,7 @@ app/src/main/java/com/zz/douyin/
     ├── Mp3Encoder.java
     ├── PlaybackState.java
     ├── PlayerHooks.java
+    ├── QualityHooks.java
     └── VideoDownloader.java
 ```
 

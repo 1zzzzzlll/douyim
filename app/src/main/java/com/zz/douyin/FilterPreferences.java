@@ -21,6 +21,13 @@ public final class FilterPreferences {
     public static final String KEY_VIDEO_KEYWORDS = "video_keywords";
     public static final String KEY_SHOW_DANMAKU = "show_danmaku";
     public static final String KEY_DOUBLE_TAP_COMMENTS = "double_tap_comments";
+    public static final String KEY_VIDEO_QUALITY = "video_quality";
+
+    /** 清晰度选项：跟随抖音自动调整。 */
+    public static final String QUALITY_AUTO = "auto";
+    /** 清晰度选项：始终选择可用档位中最高的。 */
+    public static final String QUALITY_MAX = "max";
+    public static final String DEFAULT_VIDEO_QUALITY = QUALITY_AUTO;
 
     public static final boolean DEFAULT_SKIP_ADS = true;
     public static final boolean DEFAULT_SKIP_IMAGES = true;
@@ -79,6 +86,29 @@ public final class FilterPreferences {
                 KEY_DOUBLE_TAP_COMMENTS,
                 DEFAULT_DOUBLE_TAP_COMMENTS
         );
+    }
+
+    public static String readVideoQuality(SharedPreferences preferences) {
+        if (preferences == null) {
+            return DEFAULT_VIDEO_QUALITY;
+        }
+        String value = preferences.getString(KEY_VIDEO_QUALITY, DEFAULT_VIDEO_QUALITY);
+        return isKnownQuality(value) ? value : DEFAULT_VIDEO_QUALITY;
+    }
+
+    private static boolean isKnownQuality(String value) {
+        if (value == null) {
+            return false;
+        }
+        if (QUALITY_AUTO.equals(value) || QUALITY_MAX.equals(value)) {
+            return true;
+        }
+        try {
+            int height = Integer.parseInt(value);
+            return height >= 144 && height <= 8640;
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
     }
 
     public static final class Values {

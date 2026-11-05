@@ -63,6 +63,7 @@ final class PlaybackState {
             boolean explicitPlayCall,
             boolean confirmedPlaying
     ) {
+        QualityHooks.onEngineObserved(player);
         long now = SystemClock.uptimeMillis();
         if (player != null) {
             // Keep a playing candidate even when a paused-feed transition has
@@ -131,6 +132,7 @@ final class PlaybackState {
     }
 
     static synchronized void paused(Object player) {
+        QualityHooks.onEngineObserved(player);
         Object current = engine.get();
         if (player != null && current != null && player != current) {
             Log.d(DouyinModule.TAG, "ignored pause from stale player "
