@@ -38,7 +38,7 @@
 | 默认作用域 | `com.ss.android.ugc.aweme` |
 | 模块包名 | `com.zz.douyin` |
 | 本次适配设备 | 抖音 41.0.0（versionCode 410001）／Android 17 |
-| 模块版本 | 1.7.3 |
+| 模块版本 | 1.7.4 |
 
 模块基于抖音 39.7.0 的运行时结构适配，并针对 40.5.0 补充双击拦截、40.8.0 补充弹幕分层、
 广告标记与图文渲染适配、40.9.0 补充图文图片下载、41.0.0 适配固定清晰度（模型类直挂 +
@@ -48,7 +48,7 @@
 ## 安装
 
 1. 从 [`dist`](dist) 目录下载最新版
-   [`douxianren-lsp-api102-v1.7.3.apk`](dist/douxianren-lsp-api102-v1.7.3.apk)。
+   [`douxianren-lsp-api102-v1.7.4.apk`](dist/douxianren-lsp-api102-v1.7.4.apk)。
 2. 在手机上安装 APK。
 3. 在 LSPosed 中启用“抖仙人”模块。
 4. 保持默认作用域“抖音”，然后强制停止并重新打开抖音。
@@ -59,7 +59,7 @@ LSPosed 中重新启用新包名模块并确认作用域。
 最新版 APK 的 SHA-256：
 
 ```text
-fad5e48ee44dcd8eafbdc8cf947f73835f4983123debc07f846a6d7f561792fd
+cdb0b1510cc1cac7ca1507a6aafa1ab310d06866e02f03f2639f610da48a4bf8
 ```
 
 ## 使用方式
@@ -111,6 +111,7 @@ fad5e48ee44dcd8eafbdc8cf947f73835f4983123debc07f846a6d7f561792fd
   把音轨和视频档位混在同一列表里，音轨条目带 `mResolution="360p"` 字符串，旧版把它
   误判成 360P 视频档位并按清晰度规则过滤掉，引擎拿到“无音轨”的列表就不会初始化音频
   输出。现在按 `mMediaType` 区分音轨并保留，声音恢复正常。
+- 1.7.4 调整“视频清晰度”档位选择器为三行三列网格平铺，去掉横向滑动，所有档位直接可见。
 - 1.7.1 修复 41.0.0 上的两个问题：① 清晰度钩子从不触发——41.0 的 `MTTVideoEngine`
   继承自 `TTVideoEngine`，但预加载路径不经过 `setVideoModel`，改为模型类安装期直挂后
   生效；② 钩住 `SimVideoUrlModel.hashCode` 会在哈希表运算中递归重入导致启动 ANR，

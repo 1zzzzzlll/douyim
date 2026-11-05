@@ -12,7 +12,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
-import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
@@ -283,7 +282,7 @@ public final class MainActivity extends Activity
         loading = false;
     }
 
-    /** 清晰度选择行：标题 + 说明 + 横向可滑动的档位胶囊。 */
+    /** 清晰度选择行：标题 + 说明 + 三列网格平铺的档位胶囊（不滚动，直接换行）。 */
     private void addQualitySelector(LinearLayout parent) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.VERTICAL);
@@ -302,45 +301,51 @@ public final class MainActivity extends Activity
         descriptionParams.topMargin = dp(3);
         row.addView(descriptionView, descriptionParams);
 
-        HorizontalScrollView chipScroller = new HorizontalScrollView(this);
-        chipScroller.setHorizontalScrollBarEnabled(false);
-        LinearLayout chipRow = new LinearLayout(this);
-        chipRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams chipRowParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        );
-        chipRowParams.topMargin = dp(10);
-        chipScroller.addView(chipRow, chipRowParams);
-
         qualityChips.clear();
-        for (int index = 0; index < QUALITY_VALUES.length; index++) {
-            Button chip = new Button(this);
-            chip.setText(QUALITY_LABELS[index]);
-            chip.setTextColor(TEXT_PRIMARY);
-            chip.setTextSize(13);
-            chip.setAllCaps(false);
-            chip.setMinWidth(dp(56));
-            chip.setMinimumWidth(dp(56));
-            chip.setPadding(dp(16), 0, dp(16), 0);
-            chip.setContentDescription("清晰度 " + QUALITY_LABELS[index]);
-            final String value = QUALITY_VALUES[index];
-            chip.setOnClickListener(view -> saveString(
-                    FilterPreferences.KEY_VIDEO_QUALITY,
-                    value
-            ));
-            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    dp(36)
+        for (int rowIndex = 0; rowIndex < 3; rowIndex++) {
+            LinearLayout chipRow = new LinearLayout(this);
+            chipRow.setOrientation(LinearLayout.HORIZONTAL);
+            LinearLayout.LayoutParams chipRowParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
             );
-            if (index > 0) {
-                chipParams.leftMargin = dp(8);
+            if (rowIndex == 0) {
+                chipRowParams.topMargin = dp(10);
+            } else {
+                chipRowParams.topMargin = dp(8);
             }
-            chipRow.addView(chip, chipParams);
-            qualityChips.add(chip);
+            for (int column = 0; column < 3; column++) {
+                int index = rowIndex * 3 + column;
+                if (index >= QUALITY_VALUES.length) {
+                    break;
+                }
+                Button chip = new Button(this);
+                chip.setText(QUALITY_LABELS[index]);
+                chip.setTextColor(TEXT_PRIMARY);
+                chip.setTextSize(13);
+                chip.setAllCaps(false);
+                chip.setMinWidth(0);
+                chip.setMinimumWidth(0);
+                chip.setPadding(dp(4), 0, dp(4), 0);
+                chip.setContentDescription("清晰度 " + QUALITY_LABELS[index]);
+                final String value = QUALITY_VALUES[index];
+                chip.setOnClickListener(view -> saveString(
+                        FilterPreferences.KEY_VIDEO_QUALITY,
+                        value
+                ));
+                LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(
+                        0,
+                        dp(36),
+                        1f
+                );
+                chipParams.leftMargin = column == 0 ? 0 : dp(4);
+                chipParams.rightMargin = column == 2 ? 0 : dp(4);
+                chipRow.addView(chip, chipParams);
+                qualityChips.add(chip);
+            }
+            row.addView(chipRow, chipRowParams);
         }
 
-        row.addView(chipScroller, matchWrap());
         parent.addView(row, matchWrap());
     }
 
