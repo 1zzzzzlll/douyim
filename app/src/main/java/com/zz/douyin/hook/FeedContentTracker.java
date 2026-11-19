@@ -21,6 +21,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -39,6 +40,12 @@ final class FeedContentTracker {
             "labelThumb",
             "thumb"
     };
+
+    /** 下载候选编码。ByteVC1 是抖音私有编码，系统播放器通常只能解出声音。 */
+    private static final String CODEC_H264 = "h264";
+    private static final String CODEC_HEVC = "hevc";
+    private static final String CODEC_BYTEVC1 = "bytevc1";
+    private static final String CODEC_UNKNOWN = "unknown";
 
     private static Class<?> panelClass;
     private static Method getCurrentAweme;
@@ -458,9 +465,17 @@ final class FeedContentTracker {
         }
         List<PlayUrl> primary = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
-        appendPlayUrls(primary, seen, video, "play_addr", "play_addr");
-        appendPlayUrls(primary, seen, video, "play_addr_h264", "play_addr_h264");
-        appendPlayUrls(primary, seen, video, "play_addr_bytevc1", "play_addr_bytevc1");
+        String primaryCodec = codecOf(
+                flag(readSerializedField(video, "is_h265")),
+                flag(readSerializedField(video, "is_bytevc1"))
+        );
+        appendPlayUrls(primary, seen, video, "play_addr", "play_addr", primaryCodec, 0);
+        appendPlayUrls(primary, seen, video, "play_addr_h264", "play_addr_h264",
+                CODEC_H264, 0);
+        appendPlayUrls(primary, seen, video, "play_addr_265", "play_addr_265",
+                CODEC_HEVC, 0);
+        appendPlayUrls(primary, seen, video, "play_addr_bytevc1", "play_addr_bytevc1",
+                CODEC_BYTEVC1, 0);
         // 清晰度为“自动”时保持原有顺序；钉死档位时把目标码率地址排到最前。
         String quality = FilterPreferences.readVideoQuality(filterPreferences);
         if (FilterPreferences.QUALITY_AUTO.equals(quality)) {
@@ -470,7 +485,7 @@ final class FeedContentTracker {
         }
         List<PlayUrl> ordered = orderPlayUrlsByQuality(
                 primary,
-                collectGears(video, seen),
+                collectGears(video),
                 quality
         );
         return ordered.isEmpty()
@@ -481,11 +496,13 @@ final class FeedContentTracker {
     private static void appendPlayUrls(
             List<PlayUrl> output,
             Set<String> seen,
-            Object video,
+            Object holder,
             String field,
-            String label
+            String label,
+            String codec,
+            int height
     ) {
-        Object address = readSerializedField(video, field);
+        Object address = readSerializedField(holder, field);
         if (address == null) {
             return;
         }
@@ -498,13 +515,17 @@ final class FeedContentTracker {
             return;
         }
 
-        appendUrlsWithScheme(output, seen, candidates, label, "https://");
-        appendUrlsWithScheme(output, seen, candidates, label, "http://");
+        appendUrlsWithScheme(output, seen, candidates, label, codec, height, "https://");
+        appendUrlsWithScheme(output, seen, candidates, label, codec, height, "http://");
     }
 
     /**
      * 下载地址按配置清晰度排序：目标档位（精确 > 不超过目标的最大档 > 高于目标的最小档，
      * 与播放钉死规则一致）排最前，原有顶层地址兜底，其余档位按与目标的差距排后。
+     * <p>
+     * 只能在有画面、且不是 ByteVC1 的档位里选：ByteVC1 是抖音私有编码，系统相册和
+     * 第三方播放器只能解出声音，画面是黑的；DASH 音轨条目高度为 0，但 gear_name 仍
+     * 带“1080”之类的字样，必须按高度排除，不能拿来当视频档位。
      */
     private static List<PlayUrl> orderPlayUrlsByQuality(
             List<PlayUrl> primary,
@@ -519,12 +540,13 @@ final class FeedContentTracker {
             return primary;
         }
         List<PlayUrl> ordered = new ArrayList<>();
+        Set<String> emitted = new LinkedHashSet<>();
         for (Gear gear : gears) {
             if (gear.height == chosen) {
-                ordered.addAll(gear.urls);
+                addPlayUrls(ordered, emitted, gear.urls);
             }
         }
-        ordered.addAll(primary);
+        addPlayUrls(ordered, emitted, sortByCompatibility(primary));
         List<Gear> rest = new ArrayList<>();
         for (Gear gear : gears) {
             if (gear.height != chosen) {
@@ -540,37 +562,105 @@ final class FeedContentTracker {
             return Long.compare(right.bitrate, left.bitrate);
         });
         for (Gear gear : rest) {
-            ordered.addAll(gear.urls);
+            addPlayUrls(ordered, emitted, gear.urls);
         }
         Log.d(DouyinModule.TAG, "download urls ordered by quality: setting="
                 + quality + " chosen=" + chosen + "p gears=" + describeGears(gears));
         return ordered;
     }
 
+    private static void addPlayUrls(
+            List<PlayUrl> output,
+            Set<String> seen,
+            List<PlayUrl> candidates
+    ) {
+        for (PlayUrl candidate : candidates) {
+            if (seen.add(candidate.url)) {
+                output.add(candidate);
+            }
+        }
+    }
+
+    /**
+     * 下载候选的编码顺序：H.264 所有播放器都能解，HEVC 次之，ByteVC1 放最后兜底。
+     * 同一档位的 play_addr 本身可能是 ByteVC1，但该档位的 play_addr_265 是 HEVC，
+     * 排在它前面就能避免“只有声音没有画面”。
+     */
+    private static List<PlayUrl> sortByCompatibility(List<PlayUrl> urls) {
+        List<PlayUrl> sorted = new ArrayList<>(urls);
+        sorted.sort((left, right) -> Integer.compare(
+                codecRank(left.codec),
+                codecRank(right.codec)
+        ));
+        return sorted;
+    }
+
+    private static int codecRank(String codec) {
+        if (CODEC_H264.equals(codec)) {
+            return 0;
+        }
+        if (CODEC_UNKNOWN.equals(codec)) {
+            return 1;
+        }
+        if (CODEC_HEVC.equals(codec)) {
+            return 2;
+        }
+        return 3;
+    }
+
+    private static String codecOf(boolean h265, boolean bytevc1) {
+        if (bytevc1) {
+            return CODEC_BYTEVC1;
+        }
+        if (h265) {
+            return CODEC_HEVC;
+        }
+        return CODEC_H264;
+    }
+
+    private static boolean flag(Object value) {
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        return value instanceof Number number && number.intValue() != 0;
+    }
+
     /** video.bit_rate[] 里的码率档位，每项带 gear_name 与各自的 play_addr。 */
-    private static List<Gear> collectGears(Object video, Set<String> seen) {
+    private static List<Gear> collectGears(Object video) {
         Object bitRates = readSerializedField(video, "bit_rate");
         if (bitRates == null) {
             bitRates = readField(video.getClass(), video, "bitRate");
         }
         List<Gear> gears = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        int index = 0;
         for (Object item : asIterable(bitRates)) {
+            index++;
             if (item == null) {
                 continue;
             }
             int height = gearHeight(item);
             if (height <= 0) {
+                Log.d(DouyinModule.TAG, "download gear skipped: #" + index
+                        + " has no video height (DASH audio track)");
                 continue;
             }
+            String codec = codecOf(
+                    flag(readSerializedField(item, "is_h265")),
+                    flag(readSerializedField(item, "is_bytevc1"))
+            );
             String label = "bit_rate:" + height + "p";
             List<PlayUrl> urls = new ArrayList<>();
-            appendPlayUrls(urls, seen, item, "play_addr", label);
-            appendPlayUrls(urls, seen, item, "play_addr_h264", label);
-            appendPlayUrls(urls, seen, item, "play_addr_bytevc1", label);
+            appendPlayUrls(urls, seen, item, "play_addr", label, codec, height);
+            appendPlayUrls(urls, seen, item, "play_addr_265", label,
+                    CODEC_HEVC, height);
+            appendPlayUrls(urls, seen, item, "play_addr_bytevc1", label,
+                    CODEC_BYTEVC1, height);
             if (urls.isEmpty()) {
                 continue;
             }
-            gears.add(new Gear(height, gearBitrate(item), urls));
+            gears.add(new Gear(height, gearBitrate(item), codec,
+                    sortByCompatibility(urls)));
         }
         gears.sort((left, right) -> {
             if (left.height != right.height) {
@@ -597,6 +687,22 @@ final class FeedContentTracker {
         if (target <= 0) {
             return -1;
         }
+        List<Gear> compatible = new ArrayList<>();
+        for (Gear gear : gears) {
+            if (gear.hasCompatibleUrl()) {
+                compatible.add(gear);
+            }
+        }
+        int chosen = chooseHeight(compatible, target);
+        if (chosen > 0) {
+            return chosen;
+        }
+        // 只有 ByteVC1 档位时才退回绝对最高档：至少文件本身是完整的，
+        // 抖音内可以播放，系统播放器可能只能解出声音。
+        return chooseHeight(gears, target);
+    }
+
+    private static int chooseHeight(List<Gear> gears, int target) {
         int below = -1;
         int above = -1;
         for (Gear gear : gears) {
@@ -614,7 +720,45 @@ final class FeedContentTracker {
         return below > 0 ? below : above;
     }
 
+    /**
+     * 档位高度以模型自己的 getVideoHeight()/playAddr.height 为准。
+     * 返回 0 表示这一条是 DASH 音轨（没有画面），绝不能因为 gear_name 里有
+     * “1080”就当作视频档位——抖音 41.0 的音轨条目正是这样误导的。
+     */
     private static int gearHeight(Object gear) {
+        int declaredHeight = -1;
+        Object declared = invokeNoArg(gear.getClass(), gear, "getVideoHeight");
+        if (declared instanceof Number number) {
+            declaredHeight = number.intValue();
+        }
+        int addressWidth = 0;
+        Object address = readSerializedField(gear, "play_addr");
+        if (address != null) {
+            Object widthValue = readSerializedField(address, "width");
+            if (widthValue == null) {
+                widthValue = readField(address.getClass(), address, "width");
+            }
+            if (widthValue instanceof Number number) {
+                addressWidth = number.intValue();
+            }
+            if (declaredHeight < 0) {
+                Object addressHeight = readSerializedField(address, "height");
+                if (addressHeight == null) {
+                    addressHeight = readField(address.getClass(), address, "height");
+                }
+                if (addressHeight instanceof Number number) {
+                    declaredHeight = number.intValue();
+                }
+            }
+        }
+        if (declaredHeight > 0) {
+            return declaredHeight;
+        }
+        // 高度为 0 且宽度也为 0：这是 DASH 音轨（抖音 41.0 里它仍带 gear_name=normal_1080_0）。
+        // 高度为 0 但宽度有值：视频档位只是没回填高度，继续用 gear_name 解析。
+        if (declaredHeight == 0 && addressWidth <= 0) {
+            return 0;
+        }
         Object name = readSerializedField(gear, "gear_name");
         if (name == null) {
             name = readField(gear.getClass(), gear, "gearName");
@@ -662,7 +806,8 @@ final class FeedContentTracker {
     private static String describeGears(List<Gear> gears) {
         StringBuilder builder = new StringBuilder("[");
         for (int index = 0; index < gears.size(); index++) {
-            builder.append(gears.get(index).height).append('p');
+            Gear gear = gears.get(index);
+            builder.append(gear.height).append('p').append('/').append(gear.codec);
             if (index < gears.size() - 1) {
                 builder.append(',');
             }
@@ -675,6 +820,8 @@ final class FeedContentTracker {
             Set<String> seen,
             List<?> candidates,
             String source,
+            String codec,
+            int height,
             String scheme
     ) {
         for (Object candidate : candidates) {
@@ -682,18 +829,21 @@ final class FeedContentTracker {
                 continue;
             }
             String url = candidate.toString().trim();
+            if (looksLikeAudioUrl(url)) {
+                continue;
+            }
             if (url.regionMatches(true, 0, scheme, 0, scheme.length())
                     && seen.add(url)) {
-                output.add(new PlayUrl(url, source));
+                output.add(new PlayUrl(url, source, codec, height));
             }
         }
     }
 
     /**
-     * 图文作品的图片地址：{@code images[].url_list} 是展示图（无水印），
+     * 图文作品的图片地址：{@code images[].watermark_free_download_url_list} 是原图下载链，
+     * {@code images[].url_list} 是展示图（可能被 CDN 转成 AVIF/WebP/HEIC），
      * {@code image_infos[].label_large/label_origin} 是 40.x 起的大图与原始图。
-     * 带 {@code download} / {@code watermark} 字样的分支是客户端「保存」用的水印图，只在没有
-     * 其它候选时才兜底使用。
+     * {@code download_url_list} 是客户端「保存」用的水印图，只在没有其它候选时才兜底。
      */
     private static List<ImageUrl> resolveImageUrls(Object images, Object imageInfos) {
         List<ImageUrl> output = new ArrayList<>();
@@ -738,19 +888,39 @@ final class FeedContentTracker {
         return Collections.emptyList();
     }
 
-    /** 一张图通常带多个镜像域名，按顺序全部保留，下载时逐个尝试。 */
+    /**
+     * 一张图通常带多个镜像域名，按顺序全部保留，下载时逐个尝试。
+     * 原图下载链排最前，展示图/大图随后，这样原图地址失效时还能退回展示图，
+     * 不会因为一个域名 403 就整张失败。
+     */
     private static List<String> pickImageUrls(Object image) {
+        // ImageUrlStruct 自带“无水印下载”链，是原图而不是展示用的压缩图；
+        // 旧版直接用 url_list，CDN 可能返回 AVIF/HEIC/WebP，落到相册里就像“格式乱码”。
+        List<String> output = new ArrayList<>();
+        addDistinctUrls(output, httpUrlsFrom(
+                readNested(image, "watermarkFreeDownloadUrlList")
+        ));
         for (String name : IMAGE_LABEL_FIELDS) {
-            List<String> urls = httpUrlsFrom(readNested(image, name));
-            if (!urls.isEmpty()) {
-                return urls;
-            }
+            addDistinctUrls(output, httpUrlsFrom(readNested(image, name)));
         }
-        List<String> direct = httpUrlsFrom(image);
-        if (!direct.isEmpty()) {
-            return direct;
+        addDistinctUrls(output, httpUrlsFrom(image));
+        if (!output.isEmpty()) {
+            return output;
+        }
+        // 带水印的客户端“保存”链只做最后兜底，避免把水印图当成无水印图。
+        addDistinctUrls(output, httpUrlsFrom(readNested(image, "downloadUrlList")));
+        if (!output.isEmpty()) {
+            return output;
         }
         return scanForHttpUrls(image, 0);
+    }
+
+    private static void addDistinctUrls(List<String> output, List<String> urls) {
+        for (String url : urls) {
+            if (!output.contains(url)) {
+                output.add(url);
+            }
+        }
     }
 
     private static Object readNested(Object instance, String name) {
@@ -792,6 +962,18 @@ final class FeedContentTracker {
             String value = text.toString().trim();
             return isHttpUrl(value) ? List.of(value) : Collections.emptyList();
         }
+        if (candidate instanceof Iterable<?> iterable) {
+            List<String> output = new ArrayList<>();
+            for (Object item : iterable) {
+                if (item instanceof CharSequence text) {
+                    String value = text.toString().trim();
+                    if (isHttpUrl(value)) {
+                        output.add(value);
+                    }
+                }
+            }
+            return output;
+        }
         Class<?> type = candidate.getClass();
         Object urls = invokeNoArg(type, candidate, "getUrlList");
         if (!(urls instanceof List<?>)) {
@@ -818,6 +1000,21 @@ final class FeedContentTracker {
     private static boolean isHttpUrl(String value) {
         return value.regionMatches(true, 0, "https://", 0, 8)
                 || value.regionMatches(true, 0, "http://", 0, 7);
+    }
+
+    /**
+     * 抖音 CDN 的音轨地址带 /audio/ 或 media-audio。视频下载候选里出现这类地址时
+     * 直接排除，避免把纯音轨保存成 mp4（相册里就是“只有声音没有图像”）。
+     */
+    private static boolean looksLikeAudioUrl(String url) {
+        String lower = url.toLowerCase(Locale.ROOT);
+        return lower.contains("/audio/")
+                || lower.contains("media-audio")
+                || lower.contains("mime_type=audio")
+                || lower.contains("mime_type=audio%2f")
+                || lower.endsWith(".mp3")
+                || lower.endsWith(".m4a")
+                || lower.endsWith(".aac");
     }
 
     private static List<String> scanForHttpUrls(Object value, int depth) {
@@ -1059,10 +1256,18 @@ final class FeedContentTracker {
     static final class PlayUrl {
         final String url;
         final String source;
+        final String codec;
+        final int height;
 
-        PlayUrl(String url, String source) {
+        PlayUrl(String url, String source, String codec, int height) {
             this.url = url;
             this.source = source;
+            this.codec = codec;
+            this.height = height;
+        }
+
+        boolean isByteVc1() {
+            return CODEC_BYTEVC1.equals(codec);
         }
     }
 
@@ -1070,12 +1275,24 @@ final class FeedContentTracker {
     private static final class Gear {
         final int height;
         final long bitrate;
+        final String codec;
         final List<PlayUrl> urls;
 
-        Gear(int height, long bitrate, List<PlayUrl> urls) {
+        Gear(int height, long bitrate, String codec, List<PlayUrl> urls) {
             this.height = height;
             this.bitrate = bitrate;
+            this.codec = codec;
             this.urls = Collections.unmodifiableList(new ArrayList<>(urls));
+        }
+
+        /** ByteVC1 是私有编码，系统播放器只能出声；有 H.264/HEVC 地址就算可用。 */
+        boolean hasCompatibleUrl() {
+            for (PlayUrl url : urls) {
+                if (!CODEC_BYTEVC1.equals(url.codec)) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 }

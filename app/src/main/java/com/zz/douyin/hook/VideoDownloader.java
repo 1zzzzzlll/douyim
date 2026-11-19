@@ -3,10 +3,13 @@ package com.zz.douyin.hook;
 import android.annotation.TargetApi;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.app.DownloadManager;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
@@ -159,9 +162,7 @@ final class VideoDownloader {
                 result = switch (kind) {
                     case AUDIO -> downloadAudio(context, snapshot, baseName + ".mp3", refresher);
                     case IMAGE -> downloadImages(context, snapshot, baseName);
-                    case VIDEO -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-                            ? downloadWithMediaStore(context, snapshot, baseName + ".mp4", refresher)
-                            : enqueueWithDownloadManager(context, snapshot, baseName + ".mp4");
+                    case VIDEO -> downloadVideo(context, snapshot, baseName + ".mp4", refresher);
                 };
             } catch (Throwable error) {
                 Log.e(DouyinModule.TAG,
@@ -208,6 +209,7 @@ final class VideoDownloader {
             boolean savedThis = false;
             for (String url : image.urls) {
                 File temp = null;
+                File prepared = null;
                 try {
                     ensureEnabled();
                     temp = File.createTempFile(
@@ -232,20 +234,24 @@ final class VideoDownloader {
                         throw new IOException("图片数据无效（" + probe(temp)
                                 + " type=" + contentType + "）");
                     }
+                    // AVIF/HEIC 在相册里经常只显示“格式损坏”，先校验再转成 JPEG。
+                    PreparedImage normalized = normalizeImage(context, temp, mime);
+                    prepared = normalized.file;
                     String fileName = total == 1
-                            ? baseName + extensionOf(mime)
-                            : baseName + '_' + position + extensionOf(mime);
-                    publishFile(context, temp, fileName, mime);
+                            ? baseName + extensionOf(normalized.mime)
+                            : baseName + '_' + position + extensionOf(normalized.mime);
+                    publishFile(context, prepared, fileName, normalized.mime);
                     Log.i(DouyinModule.TAG,
                             "image saved: index=" + position + "/" + total
                                     + " host=" + hostOf(url)
-                                    + " bytes=" + temp.length()
-                                    + " mime=" + mime
+                                    + " bytes=" + prepared.length()
+                                    + " sourceMime=" + mime
+                                    + " mime=" + normalized.mime
                                     + " file=" + fileName);
                     saved++;
                     savedThis = true;
                     break;
-                } catch (IOException | RuntimeException error) {
+                } catch (IOException | RuntimeException | OutOfMemoryError error) {
                     lastError = describe(error);
                     Log.w(DouyinModule.TAG,
                             "image candidate failed: index=" + position + "/" + total
@@ -255,6 +261,9 @@ final class VideoDownloader {
                 } finally {
                     if (temp != null && !temp.delete()) {
                         Log.w(DouyinModule.TAG, "could not delete temporary image");
+                    }
+                    if (prepared != null && prepared != temp && !prepared.delete()) {
+                        Log.w(DouyinModule.TAG, "could not delete converted image");
                     }
                 }
             }
@@ -274,6 +283,93 @@ final class VideoDownloader {
             return DownloadResult.message("已保存 " + saved + "/" + total + " 张图片到 Download");
         }
         return DownloadResult.message("已保存 " + total + " 张无水印图片到 Download");
+    }
+
+    /** 图片先解码校验，AVIF/HEIC 转成 JPEG，避免相册把合法图片显示成乱码。 */
+    private static PreparedImage normalizeImage(
+            Context context,
+            File source,
+            String mime
+    ) throws IOException {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(source.getAbsolutePath(), bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            throw new IOException("图片数据无法解码（" + mime + "，"
+                    + probe(source) + "）");
+        }
+        if (!needsJpeg(mime)) {
+            return new PreparedImage(source, mime);
+        }
+        Bitmap bitmap = decodeBitmap(source, bounds);
+        File jpeg = File.createTempFile(
+                "douxianren-image-jpg-",
+                ".jpg",
+                context.getCacheDir()
+        );
+        boolean ok = false;
+        try (OutputStream output = new FileOutputStream(jpeg)) {
+            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 92, output)) {
+                throw new IOException("图片转码失败");
+            }
+            ok = true;
+        } finally {
+            bitmap.recycle();
+            if (!ok && !jpeg.delete()) {
+                Log.w(DouyinModule.TAG, "could not delete failed image conversion");
+            }
+        }
+        return new PreparedImage(jpeg, "image/jpeg");
+    }
+
+    /**
+     * 相册/微信对 AVIF、HEIC、WebP 的支持参差不齐，统一落成 JPEG；
+     * PNG/GIF 保持原格式（可能有透明或动画）。
+     */
+    private static boolean needsJpeg(String mime) {
+        return "image/avif".equals(mime)
+                || "image/heic".equals(mime)
+                || "image/heif".equals(mime)
+                || "image/webp".equals(mime);
+    }
+
+    private static Bitmap decodeBitmap(File source, BitmapFactory.Options bounds)
+            throws IOException {
+        int sampleSize = 1;
+        long pixels = (long) bounds.outWidth * bounds.outHeight;
+        while (pixels / ((long) sampleSize * sampleSize) > 24_000_000L
+                && sampleSize < 8) {
+            sampleSize *= 2;
+        }
+        while (true) {
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inSampleSize = sampleSize;
+            try {
+                Bitmap bitmap = BitmapFactory.decodeFile(
+                        source.getAbsolutePath(),
+                        options
+                );
+                if (bitmap == null) {
+                    throw new IOException("图片数据无法解码");
+                }
+                return bitmap;
+            } catch (OutOfMemoryError error) {
+                if (sampleSize >= 8) {
+                    throw new IOException("图片过大，无法转码", error);
+                }
+                sampleSize *= 2;
+            }
+        }
+    }
+
+    private static final class PreparedImage {
+        final File file;
+        final String mime;
+
+        PreparedImage(File file, String mime) {
+            this.file = file;
+            this.mime = mime;
+        }
     }
 
     private static boolean isGzip(File file) {
@@ -389,21 +485,24 @@ final class VideoDownloader {
         }
     }
 
-    @TargetApi(Build.VERSION_CODES.Q)
-    private static DownloadResult downloadWithMediaStore(
+    /**
+     * 先落到缓存文件，校验确实同时含视频轨和音轨、且编码能被系统解码后再发布。
+     * 这样音轨地址（只有声音）和 ByteVC1/DASH 单轨地址（相册黑屏）都不会被保存成
+     * 一个看起来正常的 mp4。
+     */
+    private static DownloadResult downloadVideo(
             Context context,
             FeedContentTracker.Snapshot snapshot,
             String fileName,
             SnapshotSupplier refresher
     ) {
-        ContentResolver resolver = context.getContentResolver();
         Throwable lastError = null;
         List<FeedContentTracker.PlayUrl> attempts = new ArrayList<>(snapshot.playUrls);
         boolean refreshed = false;
         for (int index = 0; index < attempts.size(); index++) {
             FeedContentTracker.PlayUrl candidate = attempts.get(index);
             HttpURLConnection connection = null;
-            Uri destination = null;
+            File temp = null;
             try {
                 ensureEnabled();
                 connection = openConnection(candidate.url, true);
@@ -419,28 +518,14 @@ final class VideoDownloader {
                     throw new IOException("返回的不是视频数据");
                 }
 
-                ContentValues values = new ContentValues();
-                values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
-                values.put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4");
-                values.put(
-                        MediaStore.MediaColumns.RELATIVE_PATH,
-                        Environment.DIRECTORY_DOWNLOADS
+                temp = File.createTempFile(
+                        "douxianren-video-",
+                        ".mp4",
+                        context.getCacheDir()
                 );
-                values.put(MediaStore.MediaColumns.IS_PENDING, 1);
-                destination = resolver.insert(
-                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                        values
-                );
-                if (destination == null) {
-                    throw new IOException("无法在 Download 目录创建文件");
-                }
-
                 long bytes;
                 try (InputStream input = connection.getInputStream();
-                     OutputStream output = resolver.openOutputStream(destination, "w")) {
-                    if (output == null) {
-                        throw new IOException("无法写入视频文件");
-                    }
+                     OutputStream output = new FileOutputStream(temp)) {
                     bytes = copy(input, output);
                 }
                 long expected = connection.getContentLengthLong();
@@ -448,33 +533,29 @@ final class VideoDownloader {
                     throw new IOException("视频数据不完整");
                 }
 
+                String tracks = inspectVideo(temp);
                 ensureEnabled();
-                values.clear();
-                values.put(MediaStore.MediaColumns.IS_PENDING, 0);
-                if (resolver.update(destination, values, null, null) != 1) {
-                    throw new IOException("无法保存视频文件");
-                }
+                publishFile(context, temp, fileName, "video/mp4");
                 Log.i(DouyinModule.TAG,
                         "download completed: aid=" + snapshot.aid
                                 + " source=" + candidate.source
+                                + " codec=" + candidate.codec
                                 + " host=" + Uri.parse(candidate.url).getHost()
                                 + " bytes=" + bytes
+                                + " tracks=" + tracks
                                 + " file=" + fileName);
+                if (candidate.isByteVc1()) {
+                    return DownloadResult.message(
+                            "已保存 " + fileName + "（抖音私有编码，系统播放器可能只有声音）"
+                    );
+                }
                 return DownloadResult.completed(fileName);
             } catch (IOException | RuntimeException error) {
                 lastError = error;
-                if (destination != null) {
-                    try {
-                        resolver.delete(destination, null, null);
-                    } catch (RuntimeException cleanupError) {
-                        Log.w(DouyinModule.TAG,
-                                "failed to remove partial download",
-                                cleanupError);
-                    }
-                }
                 Log.w(DouyinModule.TAG,
                         "download candidate failed: aid=" + snapshot.aid
                                 + " source=" + candidate.source
+                                + " codec=" + candidate.codec
                                 + " host=" + Uri.parse(candidate.url).getHost(),
                         error);
                 if (!refreshed && index == attempts.size() - 1) {
@@ -485,6 +566,9 @@ final class VideoDownloader {
                 if (connection != null) {
                     connection.disconnect();
                 }
+                if (temp != null && !temp.delete()) {
+                    Log.w(DouyinModule.TAG, "could not delete temporary video");
+                }
             }
         }
         Log.e(DouyinModule.TAG,
@@ -493,39 +577,78 @@ final class VideoDownloader {
         return DownloadResult.failed(lastError == null ? null : describe(lastError));
     }
 
-    private static DownloadResult enqueueWithDownloadManager(
-            Context context,
-            FeedContentTracker.Snapshot snapshot,
-            String fileName
-    ) {
-        DownloadManager manager =
-                (DownloadManager) context.getSystemService(Context.DOWNLOAD_SERVICE);
-        if (manager == null) {
-            return DownloadResult.failed("系统下载服务不可用");
+    /**
+     * 用 MediaExtractor 读取轨道信息，返回“宽x高 视频编码 + 音频编码”用于日志。
+     * 没有视频轨（音轨地址）或没有音轨（DASH 单轨）都视为无效候选，继续尝试下一个地址。
+     */
+    private static String inspectVideo(File file) throws IOException {
+        MediaExtractor extractor = new MediaExtractor();
+        String videoMime = null;
+        String audioMime = null;
+        int width = 0;
+        int height = 0;
+        try {
+            try {
+                extractor.setDataSource(file.getAbsolutePath());
+            } catch (IOException | RuntimeException error) {
+                throw new IOException("下载的文件不是有效的 MP4", error);
+            }
+            for (int index = 0; index < extractor.getTrackCount(); index++) {
+                MediaFormat format = extractor.getTrackFormat(index);
+                String mime = format.getString(MediaFormat.KEY_MIME);
+                if (mime == null) {
+                    continue;
+                }
+                if (mime.startsWith("video/") && videoMime == null) {
+                    videoMime = mime;
+                    if (format.containsKey(MediaFormat.KEY_WIDTH)) {
+                        width = format.getInteger(MediaFormat.KEY_WIDTH);
+                    }
+                    if (format.containsKey(MediaFormat.KEY_HEIGHT)) {
+                        height = format.getInteger(MediaFormat.KEY_HEIGHT);
+                    }
+                } else if (mime.startsWith("audio/") && audioMime == null) {
+                    audioMime = mime;
+                }
+            }
+        } finally {
+            extractor.release();
         }
-        FeedContentTracker.PlayUrl candidate = snapshot.playUrls.get(0);
-        DownloadManager.Request request =
-                new DownloadManager.Request(Uri.parse(candidate.url));
-        request.setTitle("抖音无水印视频");
-        request.setDescription(fileName);
-        request.setMimeType("video/mp4");
-        request.setAllowedOverMetered(true);
-        request.setAllowedOverRoaming(true);
-        request.setNotificationVisibility(
-                DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
-        );
-        request.setDestinationInExternalPublicDir(
-                Environment.DIRECTORY_DOWNLOADS,
-                fileName
-        );
-        addRequestHeaders(request);
-        long downloadId = manager.enqueue(request);
-        Log.i(DouyinModule.TAG,
-                "download queued: aid=" + snapshot.aid
-                        + " source=" + candidate.source
-                        + " id=" + downloadId
-                        + " file=" + fileName);
-        return DownloadResult.queued(fileName);
+        if (videoMime == null) {
+            throw new IOException("下载的文件没有画面（拿到的是音轨地址）");
+        }
+        if (audioMime == null) {
+            throw new IOException("下载的文件没有声音（DASH 单轨地址）");
+        }
+        if (!canDecode(videoMime, width, height)) {
+            throw new IOException("设备无法解码该视频编码：" + videoMime);
+        }
+        return width + "x" + height + " " + videoMime + " + " + audioMime;
+    }
+
+    /** 查询系统解码器；查询失败时按“可解码”处理，避免把正常视频误判。 */
+    private static boolean canDecode(String mime, int width, int height) {
+        if (mime.startsWith("video/avc") || mime.startsWith("video/mp4v")) {
+            return true;
+        }
+        if (mime.toLowerCase().contains("bytevc1")) {
+            return false;
+        }
+        try {
+            android.media.MediaCodecList list =
+                    new android.media.MediaCodecList(
+                            android.media.MediaCodecList.REGULAR_CODECS
+                    );
+            MediaFormat format = MediaFormat.createVideoFormat(
+                    mime,
+                    Math.max(width, 2),
+                    Math.max(height, 2)
+            );
+            return list.findDecoderForFormat(format) != null;
+        } catch (RuntimeException | LinkageError error) {
+            Log.w(DouyinModule.TAG, "video decoder query failed for " + mime, error);
+            return true;
+        }
     }
 
     /** 重新读取一次当前作品，只返回与现有候选不同的地址，用于地址过期后的重试。 */
@@ -563,6 +686,12 @@ final class VideoDownloader {
             HttpURLConnection connection = null;
             try {
                 connection = openConnection(url, appAgent);
+                // 明确要 JPEG/PNG/WebP，CDN 就不会按 */* 返回 AVIF/HEIC 这类相册容易
+                // 识别失败的容器；仍返回其它格式时后面还有解码校验和转码兜底。
+                connection.setRequestProperty(
+                        "Accept",
+                        "image/jpeg,image/png,image/webp,image/*;q=0.8"
+                );
                 int status = connection.getResponseCode();
                 if (status < 200 || status >= 300) throw new IOException("HTTP " + status);
                 String contentType = connection.getContentType();
@@ -694,11 +823,16 @@ final class VideoDownloader {
                 && header[3] == '8') {
             return "image/gif";
         }
+        if (header[0] == 'B' && header[1] == 'M') return "image/bmp";
         if (header[4] == 'f' && header[5] == 't' && header[6] == 'y' && header[7] == 'p') {
             String brand = new String(header, 8, 4, StandardCharsets.US_ASCII);
-            if (brand.startsWith("avif")) return "image/avif";
+            if (brand.startsWith("avif") || brand.startsWith("avis")) {
+                return "image/avif";
+            }
             if (brand.startsWith("heic") || brand.startsWith("heix")
-                    || brand.startsWith("mif1")) {
+                    || brand.startsWith("hevc") || brand.startsWith("hevx")
+                    || brand.startsWith("heim") || brand.startsWith("heis")
+                    || brand.startsWith("mif1") || brand.startsWith("msf1")) {
                 return "image/heic";
             }
         }
@@ -746,15 +880,6 @@ final class VideoDownloader {
     private static String appUserAgent() {
         String agent = System.getProperty("http.agent");
         return agent == null || agent.isBlank() ? BROWSER_USER_AGENT : agent;
-    }
-
-    private static void addRequestHeaders(DownloadManager.Request request) {
-        request.addRequestHeader("Accept", "*/*");
-        request.addRequestHeader("Referer", "https://www.douyin.com/");
-        String userAgent = appUserAgent();
-        if (userAgent != null && !userAgent.isBlank()) {
-            request.addRequestHeader("User-Agent", userAgent);
-        }
     }
 
     private static long copy(InputStream input, OutputStream output) throws IOException {

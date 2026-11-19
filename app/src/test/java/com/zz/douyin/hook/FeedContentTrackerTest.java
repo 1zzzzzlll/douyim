@@ -327,6 +327,112 @@ public final class FeedContentTrackerTest {
     }
 
     @Test
+    public void audioTrackGearWithVideoLikeNameIsIgnored() throws Exception {
+        configurePreferences(FilterPreferences.QUALITY_MAX);
+        FakeAweme aweme = videoAweme(0);
+        aweme.video = new FakeGearVideo(
+                List.of("https://example.invalid/default.mp4"),
+                List.of(
+                        new FakeAudioBitRate(
+                                "normal_1080_0",
+                                128_000L,
+                                List.of("https://example.invalid/audio.m4a")
+                        ),
+                        new FakeBitRate(
+                                "normal_720_0",
+                                1_000_000L,
+                                List.of("https://example.invalid/720.mp4")
+                        )
+                )
+        );
+
+        FeedContentTracker.Snapshot snapshot = snapshot(aweme);
+
+        assertEquals("bit_rate:720p", snapshot.playUrls.get(0).source);
+        assertEquals("https://example.invalid/720.mp4", snapshot.playUrls.get(0).url);
+    }
+
+    @Test
+    public void maxQualitySkipsByteVc1OnlyGear() throws Exception {
+        configurePreferences(FilterPreferences.QUALITY_MAX);
+        FakeAweme aweme = videoAweme(0);
+        aweme.video = new FakeGearVideo(
+                List.of("https://example.invalid/default.mp4"),
+                List.of(
+                        new FakeBitRate(
+                                "normal_2160_0",
+                                8_000_000L,
+                                List.of("https://example.invalid/2160.mp4"),
+                                0,
+                                1
+                        ),
+                        new FakeBitRate(
+                                "normal_1080_0",
+                                2_000_000L,
+                                List.of("https://example.invalid/1080.mp4")
+                        )
+                )
+        );
+
+        FeedContentTracker.Snapshot snapshot = snapshot(aweme);
+
+        assertEquals("bit_rate:1080p", snapshot.playUrls.get(0).source);
+        assertEquals("https://example.invalid/1080.mp4", snapshot.playUrls.get(0).url);
+    }
+
+    @Test
+    public void hevcAddressComesBeforeByteVc1WithinSameGear() throws Exception {
+        configurePreferences("1080");
+        FakeAweme aweme = videoAweme(0);
+        FakeBitRate gear = new FakeBitRate(
+                "normal_1080_0",
+                2_000_000L,
+                List.of("https://example.invalid/1080-bytevc1.mp4"),
+                0,
+                1
+        );
+        gear.playAddress265 = new FakeUrlModel(
+                List.of("https://example.invalid/1080-hevc.mp4")
+        );
+        aweme.video = new FakeGearVideo(
+                List.of("https://example.invalid/default.mp4"),
+                List.of(gear)
+        );
+
+        FeedContentTracker.Snapshot snapshot = snapshot(aweme);
+
+        assertEquals("bit_rate:1080p", snapshot.playUrls.get(0).source);
+        assertEquals("https://example.invalid/1080-hevc.mp4", snapshot.playUrls.get(0).url);
+    }
+
+    @Test
+    public void audioUrlsAreNotVideoCandidates() throws Exception {
+        FakeAweme aweme = videoAweme(0);
+        aweme.video = new FakeVideo(
+                List.of("https://example.invalid/audio/track.m4a")
+        );
+
+        FeedContentTracker.Snapshot snapshot = snapshot(aweme);
+
+        assertTrue(snapshot.playUrls.isEmpty());
+    }
+
+    @Test
+    public void watermarkFreeDownloadUrlsArePreferred() throws Exception {
+        FakeAweme aweme = videoAweme(2);
+        aweme.video = null;
+        FakeImage image = new FakeImage(List.of("https://p3.douyinpic.com/display.webp"));
+        image.watermarkFreeDownloadUrlList =
+                List.of("https://p3.douyinpic.com/clean.jpeg");
+        aweme.images = List.of(image);
+
+        List<FeedContentTracker.ImageUrl> urls = snapshot(aweme).imageUrls();
+
+        assertEquals(1, urls.size());
+        assertEquals("https://p3.douyinpic.com/clean.jpeg", urls.get(0).primary());
+    }
+
+    @Test
     public void pinnedQualityPutsTargetGearFirst() throws Exception {
         configurePreferences("540");
 
@@ -485,11 +591,11 @@ public final class FeedContentTrackerTest {
         public final FakeUrlModel playAddress;
 
         @SerializedName("bit_rate")
-        public final List<FakeBitRate> bitRates;
+        public final List<Object> bitRates;
 
-        FakeGearVideo(List<String> urls, List<FakeBitRate> bitRates) {
+        FakeGearVideo(List<String> urls, List<?> bitRates) {
             this.playAddress = new FakeUrlModel(urls);
-            this.bitRates = bitRates;
+            this.bitRates = new java.util.ArrayList<>(bitRates);
         }
     }
 
@@ -503,10 +609,53 @@ public final class FeedContentTrackerTest {
         @SerializedName("play_addr")
         public final FakeUrlModel playAddress;
 
+        @SerializedName("play_addr_265")
+        public FakeUrlModel playAddress265;
+
+        @SerializedName("is_h265")
+        public final int isH265;
+
+        @SerializedName("is_bytevc1")
+        public final Integer isBytevc1;
+
         FakeBitRate(String gearName, long bitrate, List<String> urls) {
+            this(gearName, bitrate, urls, 0, 0);
+        }
+
+        FakeBitRate(
+                String gearName,
+                long bitrate,
+                List<String> urls,
+                int isH265,
+                Integer isBytevc1
+        ) {
             this.gearName = gearName;
             this.bitrate = bitrate;
             this.playAddress = new FakeUrlModel(urls);
+            this.isH265 = isH265;
+            this.isBytevc1 = isBytevc1;
+        }
+    }
+
+    /** 模拟 41.0 bit_rate 里混入的 DASH 音轨：高度为 0，但 gear_name 仍带 1080。 */
+    public static final class FakeAudioBitRate {
+        @SerializedName("gear_name")
+        public final String gearName;
+
+        @SerializedName("bit_rate")
+        public final long bitrate;
+
+        @SerializedName("play_addr")
+        public final FakeUrlModel playAddress;
+
+        FakeAudioBitRate(String gearName, long bitrate, List<String> urls) {
+            this.gearName = gearName;
+            this.bitrate = bitrate;
+            this.playAddress = new FakeUrlModel(urls);
+        }
+
+        public int getVideoHeight() {
+            return 0;
         }
     }
 
@@ -592,6 +741,9 @@ public final class FeedContentTrackerTest {
 
         @SerializedName("download_url_list")
         public List<String> downloadUrlList;
+
+        @SerializedName("watermark_free_download_url_list")
+        public List<String> watermarkFreeDownloadUrlList;
 
         FakeImage(List<String> urls) {
             this.urlList = urls;
