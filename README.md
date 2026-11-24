@@ -40,7 +40,7 @@
 | 默认作用域 | `com.ss.android.ugc.aweme` |
 | 模块包名 | `com.zz.douyin` |
 | 本次适配设备 | 抖音 41.0.0（versionCode 410001）／Android 17 |
-| 模块版本 | 1.7.6 |
+| 模块版本 | 1.7.7 |
 
 模块基于抖音 39.7.0 的运行时结构适配，并针对 40.5.0 补充双击拦截、40.8.0 补充弹幕分层、
 广告标记与图文渲染适配、40.9.0 补充图文图片下载、41.0.0 适配固定清晰度（模型类直挂 +
@@ -50,7 +50,7 @@
 ## 安装
 
 1. 从 [`dist`](dist) 目录下载最新版
-   [`douxianren-lsp-api102-v1.7.6.apk`](dist/douxianren-lsp-api102-v1.7.6.apk)。
+   [`douxianren-lsp-api102-v1.7.7.apk`](dist/douxianren-lsp-api102-v1.7.7.apk)。
 2. 在手机上安装 APK。
 3. 在 LSPosed 中启用“抖仙人”模块。
 4. 保持默认作用域“抖音”，然后强制停止并重新打开抖音。
@@ -61,7 +61,7 @@ LSPosed 中重新启用新包名模块并确认作用域。
 最新版 APK 的 SHA-256：
 
 ```text
-c3d8e261c723f865127384f220ce39ecf598a245769c5bfa9e24ef47659e0c4d
+bed3348894c3b69bb5a46220a96bf04141d93b67fe6d73d8bd61cffe5f871337
 ```
 
 ## 使用方式

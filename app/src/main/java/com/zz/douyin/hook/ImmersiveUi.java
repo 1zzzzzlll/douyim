@@ -126,12 +126,26 @@ final class ImmersiveUi {
         return moduleEnabled;
     }
 
+    /**
+     * The landscape long-video page (LandscapeFeedActivity) has its own controls, a
+     * double-tap pause toggle and no right-hand action bar. The portrait feed logic (hiding
+     * every control, swallowing double taps, auto swiping) breaks it, so the module stays out.
+     */
+    static boolean isLandscapeFeed(Activity activity) {
+        return activity != null
+                && activity.getClass().getName().contains(".longervideo.landscape.");
+    }
+
+    static boolean isLandscapeFeedActive() {
+        return isLandscapeFeed(active.get());
+    }
+
     static boolean shouldBlockDoubleTap() {
-        return moduleEnabled && blockDoubleTap;
+        return moduleEnabled && blockDoubleTap && !isLandscapeFeedActive();
     }
 
     static boolean shouldOpenCommentsOnDoubleTap() {
-        return moduleEnabled && openCommentsOnDoubleTap;
+        return moduleEnabled && openCommentsOnDoubleTap && !isLandscapeFeedActive();
     }
 
     /**
@@ -341,7 +355,7 @@ final class ImmersiveUi {
     }
 
     static void beforeActivityTouch(Activity activity, MotionEvent event) {
-        if (!moduleEnabled) return;
+        if (!moduleEnabled || isLandscapeFeed(activity)) return;
         if (swipeRunning
                 || !touchInProgress
                 || event.getActionMasked() != MotionEvent.ACTION_UP
@@ -363,7 +377,7 @@ final class ImmersiveUi {
     }
 
     static void onActivityTouch(Activity activity, MotionEvent event) {
-        if (!moduleEnabled) return;
+        if (!moduleEnabled || isLandscapeFeed(activity)) return;
         int action = event.getActionMasked();
         if (swipeRunning) {
             if (touchInProgress
@@ -599,6 +613,7 @@ final class ImmersiveUi {
         MAIN.post(() -> {
             if (!moduleEnabled) return;
             Activity activity = activeActivity();
+            if (isLandscapeFeed(activity)) return;
             View decor = activeDecor(activity);
             if (decor == null) {
                 return;
@@ -647,6 +662,13 @@ final class ImmersiveUi {
             return;
         }
         if (activity != null && (activity.isFinishing() || activity.isDestroyed())) {
+            return;
+        }
+        if (isLandscapeFeed(activity)) {
+            // Leave the landscape long-video page completely native.
+            removeDownloadButton();
+            restoreAll(activity, decor);
+            scheduleScan(300L);
             return;
         }
 
@@ -729,6 +751,16 @@ final class ImmersiveUi {
                     transitionBoostUntil
             )) {
                 reassertHiddenViews();
+                // The Surface may be momentarily invalid during a fullscreen transition.
+                // Rebuild gesture paths from the LongPressLayout even when no video surface
+                // is confirmed, so single-tap / double-tap / swipe remain functional as
+                // soon as the surface re-attaches. Without this, GESTURE_PATHS keeps stale
+                // references and shouldBlockHiddenTouch blocks every touch event.
+                List<View> gestureCandidates = new ArrayList<>();
+                collectFallbackGestureViews(decor, gestureCandidates);
+                if (!gestureCandidates.isEmpty()) {
+                    updateGesturePaths(decor, gestureCandidates);
+                }
                 hideSystemBars(activity, decor);
             } else {
                 restoreAll(activity, decor);
@@ -800,6 +832,7 @@ final class ImmersiveUi {
 
     private static void showDownloadButton(Activity activity, View decor) {
         if (!moduleEnabled || activity == null
+                || isLandscapeFeed(activity)
                 || decor == null
                 || !canDownload()
                 || !(decor instanceof FrameLayout container)) {
@@ -1516,12 +1549,35 @@ final class ImmersiveUi {
         }
     }
 
+    /**
+     * Collect LongPressLayout views by name and size alone, without requiring a live video
+     * surface. Used during fullscreen transitions when the Surface is momentarily detached,
+     * so GESTURE_PATHS stays current and touch events are not blocked.
+     */
+    private static void collectFallbackGestureViews(View node, List<View> out) {
+        if (ImmersiveTouchPolicy.isGestureView(node.getClass().getName())
+                && node.isAttachedToWindow()
+                && node.getVisibility() == View.VISIBLE
+                && node.getWidth() > 0
+                && node.getHeight() > 0) {
+            out.add(node);
+        }
+        if (node instanceof ViewGroup group) {
+            for (int i = 0; i < group.getChildCount(); i++) {
+                collectFallbackGestureViews(group.getChildAt(i), out);
+            }
+        }
+    }
+
     static boolean isImmersiveGestureView(View view) {
         return moduleEnabled && immersiveEnabled && hasHiddenViews() && GESTURE_PATHS.contains(view)
                 && ImmersiveTouchPolicy.isGestureView(view.getClass().getName());
     }
 
     static boolean shouldBlockHiddenTouch(View view, boolean cancel) {
+        if (isLandscapeFeedActive()) {
+            return false;
+        }
         if (isSyntheticTapActive()) {
             // Our own comment tap has to reach the hidden right bar.
             return false;
@@ -1928,7 +1984,11 @@ final class ImmersiveUi {
             filterBurstStart = now;
             filterBurstCount = 0;
         }
-        if (++filterBurstCount > 6) {
+        // Only count a burst entry when the swipe actually executes; a throttled or
+        // rejected swipeToNext (e.g. 1 500 ms cooldown after the previous ad skip) must
+        // not advance the counter, otherwise the safety valve fires prematurely and
+        // leaves a white/black ad screen on screen for 60 s without scrolling away.
+        if (filterBurstCount >= 6) {
             filterSuspendedUntil = now + 60_000L;
             Log.w(DouyinModule.TAG,
                     "filter suspended for 60s after " + filterBurstCount
@@ -1939,6 +1999,7 @@ final class ImmersiveUi {
         if (!swipeToNext(decor, reason)) {
             return false;
         }
+        filterBurstCount++;
         lastFilteredSwipeAt = now;
         Log.i(DouyinModule.TAG, "filtering feed item: " + reason);
         return true;
