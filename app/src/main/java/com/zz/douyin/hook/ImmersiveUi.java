@@ -79,6 +79,8 @@ final class ImmersiveUi {
     private static boolean touchDownImmersive;
     private static String touchDownAid;
     private static String touchDownObservedAid;
+    private static String touchDownPageIdentity;
+    private static String lastObservedPageIdentity;
     private static Object touchDownEngine;
     private static int touchDownEngineState;
     private static WeakReference<TextView> downloadButton =
@@ -334,12 +336,15 @@ final class ImmersiveUi {
         MAIN.post(() -> {
             Activity current = active.get();
             if (current == activity) {
+                // Cancel any pending tap-pause check so an Activity transition / focus loss
+                // that pauses the host player does not latch userPaused=true.
+                touchGestureToken++;
+                touchInProgress = false;
                 removeDownloadButton();
                 VideoDownloader.dismissChooser();
                 restoreAll(current);
                 active.clear();
                 activeRoot.clear();
-                touchInProgress = false;
             }
         });
     }
@@ -369,7 +374,7 @@ final class ImmersiveUi {
         float dx = event.getRawX() - touchDownX;
         float dy = event.getRawY() - touchDownY;
         if (decor != null
-                && Math.abs(dy) > 72f * density
+                && Math.abs(dy) > 36f * density
                 && Math.abs(dy) > Math.abs(dx)) {
             PlaybackState.beginAutoSwitch();
             boostTransitionWindow();
@@ -400,6 +405,7 @@ final class ImmersiveUi {
             touchDownAid = touchDownObservedAid == null
                     ? lastAcceptedAid
                     : touchDownObservedAid;
+            touchDownPageIdentity = FeedContentTracker.currentPageIdentity(decor);
             touchDownEngine = PlaybackState.engine();
             touchDownEngineState = PlaybackState.engineState(touchDownEngine);
             return;
@@ -426,13 +432,14 @@ final class ImmersiveUi {
                 ? 1f
                 : decor.getResources().getDisplayMetrics().density;
         if (decor != null
-                && Math.abs(dy) > 72f * density
+                && Math.abs(dy) > 36f * density
                 && Math.abs(dy) > Math.abs(dx)) {
             boostTransitionWindow();
             armContentFilter(700L);
             confirmUserFeedSwitch(
                     touchGestureToken,
                     touchDownAid,
+                    touchDownPageIdentity,
                     decor,
                     8
             );
@@ -454,6 +461,7 @@ final class ImmersiveUi {
         Object pauseIntentEngine = touchDownEngine;
         int pauseIntentInitialState = touchDownEngineState;
         String pauseIntentAid = touchDownObservedAid;
+        String pauseIntentPage = touchDownPageIdentity;
         touchDownEngine = null;
         if (resumeRequested) {
             confirmUserResume(
@@ -468,6 +476,7 @@ final class ImmersiveUi {
                     pauseIntentEngine,
                     pauseIntentInitialState,
                     pauseIntentAid,
+                    pauseIntentPage,
                     activity,
                     decor,
                     4
@@ -510,6 +519,7 @@ final class ImmersiveUi {
             Object pauseIntentEngine,
             int pauseIntentInitialState,
             String pauseIntentAid,
+            String pauseIntentPage,
             Activity activity,
             View decor,
             int attemptsLeft
@@ -519,17 +529,35 @@ final class ImmersiveUi {
                     || PlaybackState.isUserPaused()) {
                 return;
             }
+            if (activity == null
+                    || active.get() != activity
+                    || activity.isFinishing()
+                    || activity.isDestroyed()
+                    || !activity.hasWindowFocus()
+                    || isCommentPanelVisible(decor)) {
+                // Pause triggered by leaving the Activity, losing window focus (dialog /
+                // shade / secondary page), or opening comments is not a user feed pause.
+                return;
+            }
+            String currentPage = FeedContentTracker.currentPageIdentity(decor);
+            if (PlaybackState.isDifferentKnownPage(pauseIntentPage, currentPage)) {
+                return;
+            }
             FeedContentTracker.Snapshot currentModel =
                     FeedContentTracker.current(decor);
             String confirmedPauseAid = currentModel == null
                     ? pauseIntentAid
                     : currentModel.aid;
+            if (PlaybackState.isDifferentKnownContent(pauseIntentAid, confirmedPauseAid)) {
+                return;
+            }
             boolean confirmedPause =
                     PlaybackState.confirmUserPaused(
                             pauseIntentEngine,
                             pauseIntentAt,
                             pauseIntentInitialState,
-                            confirmedPauseAid
+                            confirmedPauseAid,
+                            currentPage != null ? currentPage : pauseIntentPage
                     );
             if (confirmedPause) {
                 restoreAll(activity, decor);
@@ -543,6 +571,7 @@ final class ImmersiveUi {
                         pauseIntentEngine,
                         pauseIntentInitialState,
                         pauseIntentAid,
+                        pauseIntentPage,
                         activity,
                         decor,
                         attemptsLeft - 1
@@ -557,14 +586,20 @@ final class ImmersiveUi {
 
     private static void confirmUserFeedSwitch(long token,
                                               String previousAid,
+                                              String previousPage,
                                               View decor,
                                               int attemptsLeft) {
         MAIN.postDelayed(() -> {
-            if (token != touchGestureToken || previousAid == null) {
+            if (token != touchGestureToken) {
                 return;
             }
+            String currentPage = FeedContentTracker.currentPageIdentity(decor);
+            boolean pageChanged = PlaybackState.isDifferentKnownPage(previousPage, currentPage);
             FeedContentTracker.Snapshot model = FeedContentTracker.current(decor);
-            if (model != null && !previousAid.equals(model.aid)) {
+            boolean aidChanged = previousAid != null
+                    && model != null
+                    && PlaybackState.isDifferentKnownContent(previousAid, model.aid);
+            if (pageChanged || aidChanged) {
                 if (PlaybackState.isUserPaused()) {
                     PlaybackState.userPlaying();
                 } else {
@@ -573,8 +608,14 @@ final class ImmersiveUi {
                 scheduleScan(0L);
                 return;
             }
-            if (attemptsLeft > 1) {
-                confirmUserFeedSwitch(token, previousAid, decor, attemptsLeft - 1);
+            if (attemptsLeft > 1 && (previousPage != null || previousAid != null)) {
+                confirmUserFeedSwitch(
+                        token,
+                        previousAid,
+                        previousPage,
+                        decor,
+                        attemptsLeft - 1
+                );
             }
         }, 160L);
     }
@@ -672,6 +713,8 @@ final class ImmersiveUi {
             return;
         }
 
+        syncVisibleFeedPage(decor);
+
         if (PlaybackState.consumePlaybackError()) {
             onPlaybackCompleted("playback error");
             scheduleNextScan();
@@ -724,6 +767,7 @@ final class ImmersiveUi {
         );
         if (!videos.isEmpty()) {
             videoMissingLogged = false;
+            attachHiddenViewGuard(decor);
             expandVideoViewport(decor, videos);
             List<View> preservedViews = new ArrayList<>(videos);
             if (showDanmaku) {
@@ -772,6 +816,24 @@ final class ImmersiveUi {
             }
         }
         scheduleNextScan();
+    }
+
+    private static void syncVisibleFeedPage(View decor) {
+        String currentPage = FeedContentTracker.currentPageIdentity(decor);
+        if (currentPage == null) {
+            return;
+        }
+        String previousPage = lastObservedPageIdentity;
+        lastObservedPageIdentity = currentPage;
+        if (PlaybackState.isDifferentKnownPage(previousPage, currentPage)) {
+            boostTransitionWindow();
+            armContentFilter(120L);
+            if (!PlaybackState.clearUserPauseForPageChange(currentPage)) {
+                PlaybackState.confirmVideoSwitch();
+            }
+        } else if (PlaybackState.isUserPaused()) {
+            PlaybackState.clearUserPauseForPageChange(currentPage);
+        }
     }
 
     private static void scheduleNextScan() {
@@ -1096,7 +1158,6 @@ final class ImmersiveUi {
                 return null;
             }
 
-            Activity fallback = null;
             for (Object record : activities.values()) {
                 if (record == null) {
                     continue;
@@ -1109,7 +1170,6 @@ final class ImmersiveUi {
                         || candidate.isDestroyed()) {
                     continue;
                 }
-                fallback = candidate;
                 try {
                     Field pausedField = record.getClass().getDeclaredField("paused");
                     pausedField.setAccessible(true);
@@ -1120,7 +1180,7 @@ final class ImmersiveUi {
                     return candidate;
                 }
             }
-            return fallback;
+            return null;
         } catch (ReflectiveOperationException | RuntimeException error) {
             if (!activityResolveErrorLogged) {
                 activityResolveErrorLogged = true;
@@ -1134,13 +1194,13 @@ final class ImmersiveUi {
         List<View> candidates = new ArrayList<>();
         List<View> photoCandidates = new ArrayList<>();
         collectRenderViews(root, candidates, photoCandidates);
-        List<View> visible = centeredVisibleVideoViews(root, candidates);
+        List<View> visible = centeredVisibleVideoViews(root, candidates, true);
         visible.removeIf(ImmersiveUi::isRenderSurfaceUnavailable);
         List<View> preserved = new ArrayList<>(visible);
         // 图文/图集 posts draw the photo in a large image or Skity view while the "video"
         // surface stays black. Merging those layers unconditionally (instead of waiting for
         // the content model) removes the black frame when a video turns into a 图文 post.
-        for (View photo : centeredVisibleVideoViews(root, photoCandidates)) {
+        for (View photo : centeredVisibleVideoViews(root, photoCandidates, false)) {
             if (!preserved.contains(photo)) {
                 preserved.add(photo);
             }
@@ -1198,7 +1258,7 @@ final class ImmersiveUi {
         }
         List<View> candidates = new ArrayList<>();
         collectFallbackVideoViews(root, candidates);
-        List<View> visible = centeredVisibleVideoViews(root, candidates);
+        List<View> visible = centeredVisibleVideoViews(root, candidates, true);
         // A preserved renderer without a valid Surface would show a black picture with all
         // host UI hidden; restoring the UI is always better than a black screen.
         visible.removeIf(ImmersiveUi::isRenderSurfaceUnavailable);
@@ -1238,7 +1298,8 @@ final class ImmersiveUi {
 
     private static List<View> centeredVisibleVideoViews(
             View root,
-            List<View> candidates
+            List<View> candidates,
+            boolean allowWidescreenBand
     ) {
         Rect rootVisible = new Rect();
         if (!root.getGlobalVisibleRect(rootVisible)) {
@@ -1246,9 +1307,8 @@ final class ImmersiveUi {
         }
         int centerX = rootVisible.centerX();
         int centerY = rootVisible.centerY();
-        long screenArea =
-                (long) Math.max(1, rootVisible.width())
-                        * Math.max(1, rootVisible.height());
+        int rootWidth = Math.max(1, rootVisible.width());
+        int rootHeight = Math.max(1, rootVisible.height());
         List<View> videoPaths = new ArrayList<>();
         Rect visible = new Rect();
         for (View candidate : candidates) {
@@ -1258,19 +1318,65 @@ final class ImmersiveUi {
                     || candidate.getVisibility() != View.VISIBLE
                     || !candidate.isShown()
                     || !alphaVisible
-                    || !candidate.getGlobalVisibleRect(visible)
-                    || !visible.contains(centerX, centerY)) {
+                    || !candidate.getGlobalVisibleRect(visible)) {
                 continue;
             }
-            long area = (long) visible.width() * visible.height();
-            if (area >= screenArea / 5L
-                    && !videoPaths.contains(candidate)) {
+            if (isCenteredVideoBounds(
+                    rootVisible.top,
+                    rootWidth,
+                    rootHeight,
+                    centerX,
+                    centerY,
+                    visible.left,
+                    visible.top,
+                    visible.right,
+                    visible.bottom,
+                    allowWidescreenBand
+            ) && !videoPaths.contains(candidate)) {
                 videoPaths.add(candidate);
             }
         }
         return videoPaths.isEmpty()
                 ? Collections.emptyList()
                 : videoPaths;
+    }
+
+    static boolean isCenteredVideoBounds(
+            int rootTop,
+            int rootWidth,
+            int rootHeight,
+            int centerX,
+            int centerY,
+            int left,
+            int top,
+            int right,
+            int bottom,
+            boolean allowWidescreenBand
+    ) {
+        int width = right - left;
+        int height = bottom - top;
+        if (width <= 0 || height <= 0 || rootWidth <= 0 || rootHeight <= 0) {
+            return false;
+        }
+        long screenArea = (long) rootWidth * rootHeight;
+        long area = (long) width * height;
+        boolean containsCenter =
+                centerX >= left && centerX < right && centerY >= top && centerY < bottom;
+        if (containsCenter && area >= screenArea / 5L) {
+            return true;
+        }
+        // Douyin 41.x places horizontal 16:9 / 21:9 cinema videos slightly above the
+        // full-window vertical center (to leave space for the fullscreen entry pill
+        // below), and 2.39:1 surfaces occupy ~19% of tall 20:9 screens. Accept those
+        // real video surfaces without loosening ImageView / banner filtering.
+        int viewCenterY = top + height / 2;
+        return allowWidescreenBand
+                && width >= rootWidth * 0.85f
+                && height >= rootHeight * 0.14f
+                && left <= centerX
+                && right >= centerX
+                && viewCenterY >= rootTop + Math.round(rootHeight * 0.20f)
+                && viewCenterY <= rootTop + Math.round(rootHeight * 0.80f);
     }
 
     private static void collectRealVideoViews(View view, List<View> out) {

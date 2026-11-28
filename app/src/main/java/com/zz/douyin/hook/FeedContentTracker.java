@@ -5,6 +5,7 @@ import android.graphics.Rect;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
+import android.view.ViewGroup;
 
 import com.zz.douyin.FilterPreferences;
 
@@ -47,6 +48,18 @@ final class FeedContentTracker {
     private static final String CODEC_BYTEVC1 = "bytevc1";
     private static final String CODEC_UNKNOWN = "unknown";
 
+    private static final String VERTICAL_VIEW_PAGER_CLASS =
+            "com.ss.android.ugc.aweme.common.widget.VerticalViewPager";
+    private static final String[] CONCRETE_PANEL_CLASSES = {
+            "com.ss.android.ugc.aweme.feed.panel.FullFeedFragmentPanel",
+            "com.ss.android.ugc.aweme.feed.panel.FollowFeedFragmentPanel",
+            "com.ss.android.ugc.aweme.feed.ui.FamiliarFullFeedFragmentPanel"
+    };
+    private static final Set<Class<?>> HOOKED_PAGE_LISTENERS =
+            Collections.newSetFromMap(new WeakHashMap<>());
+    private static final Map<Class<?>, Boolean> VERTICAL_PAGER_TYPES =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
     private static Class<?> panelClass;
     private static Method getCurrentAweme;
     private static Field viewPagerField;
@@ -69,6 +82,7 @@ final class FeedContentTracker {
     )
             throws ReflectiveOperationException {
         configurePreferences(preferences);
+        installPagerHooks(module, loader);
         panelClass = Class.forName(
                 "com.ss.android.ugc.aweme.feed.panel.BaseListFragmentPanel",
                 false,
@@ -77,15 +91,44 @@ final class FeedContentTracker {
         getCurrentAweme = panelClass.getDeclaredMethod("getCurrentAweme");
         viewPagerField = panelClass.getField("f");
 
-        for (Constructor<?> constructor : panelClass.getDeclaredConstructors()) {
-            module.hook(constructor)
-                    .setId("douyin-immersive-feed-panel-" + constructor.toGenericString())
+        hookPanelConstructors(module, panelClass);
+        for (String subclassName : CONCRETE_PANEL_CLASSES) {
+            try {
+                Class<?> subclass = Class.forName(subclassName, false, loader);
+                if (panelClass.isAssignableFrom(subclass)) {
+                    hookPanelConstructors(module, subclass);
+                }
+            } catch (ClassNotFoundException ignored) {
+                // Optional feed panel variants may move across Douyin versions.
+            }
+        }
+
+        // Android 17 profile-guided AOT (base.dm) can inline BaseListFragmentPanel.<init>
+        // into subclass constructors, leaving PANELS empty if only <init> is hooked.
+        // Recording `this` on runtime panel methods guarantees discovery.
+        module.hook(getCurrentAweme)
+                .setId("douyin-immersive-feed-panel-current-aweme")
+                .setExceptionMode(DouyinModule.ExceptionMode.PROTECTIVE)
+                .intercept(chain -> {
+                    remember(chain.getThisObject());
+                    return chain.proceed();
+                });
+
+        try {
+            Method scrollState = panelClass.getDeclaredMethod(
+                    "onPageScrollStateChanged", int.class
+            );
+            module.hook(scrollState)
+                    .setId("douyin-immersive-feed-panel-scroll-state")
                     .setExceptionMode(DouyinModule.ExceptionMode.PROTECTIVE)
                     .intercept(chain -> {
-                        Object result = chain.proceed();
-                        remember(chain.getThisObject());
-                        return result;
+                        Object panel = chain.getThisObject();
+                        remember(panel);
+                        selectedPanel = new WeakReference<>(panel);
+                        return chain.proceed();
                     });
+        } catch (NoSuchMethodException ignored) {
+            // Optional secondary discovery point.
         }
 
         try {
@@ -101,11 +144,78 @@ final class FeedContentTracker {
                         ImmersiveUi.onFeedPageSelected();
                         return result;
                     });
-        } catch (NoSuchMethodException error) {
-            module.log(Log.WARN, DouyinModule.TAG,
-                    "feed page-selection hook unavailable; using visible-panel fallback");
+        } catch (NoSuchMethodException ignored) {
+            module.log(Log.DEBUG, DouyinModule.TAG,
+                    "legacy y0(int) page hook absent; using VerticalViewPager listener hook");
         }
         module.log(Log.INFO, DouyinModule.TAG, "current feed model hook installed");
+    }
+
+    private static void hookPanelConstructors(DouyinModule module, Class<?> type) {
+        for (Constructor<?> constructor : type.getDeclaredConstructors()) {
+            module.hook(constructor)
+                    .setId("douyin-immersive-feed-panel-" + constructor.toGenericString())
+                    .setExceptionMode(DouyinModule.ExceptionMode.PROTECTIVE)
+                    .intercept(chain -> {
+                        Object result = chain.proceed();
+                        remember(chain.getThisObject());
+                        return result;
+                    });
+        }
+    }
+
+    private static void installPagerHooks(DouyinModule module, ClassLoader loader) {
+        try {
+            Class<?> pagerClass = Class.forName(VERTICAL_VIEW_PAGER_CLASS, false, loader);
+            for (Method method : pagerClass.getDeclaredMethods()) {
+                if ("addOnPageChangeListener".equals(method.getName())
+                        && method.getParameterCount() == 1) {
+                    module.hook(method)
+                            .setId("douyin-immersive-pager-listener-" + method.toGenericString())
+                            .setExceptionMode(DouyinModule.ExceptionMode.PROTECTIVE)
+                            .intercept(chain -> {
+                                Object result = chain.proceed();
+                                Object listener = chain.getArgs().get(0);
+                                if (listener != null) {
+                                    hookPageChangeListener(module, listener.getClass());
+                                }
+                                return result;
+                            });
+                }
+            }
+        } catch (Throwable error) {
+            module.log(Log.WARN, DouyinModule.TAG,
+                    "VerticalViewPager listener hook failed", error);
+        }
+    }
+
+    private static void hookPageChangeListener(DouyinModule module, Class<?> listenerType) {
+        synchronized (HOOKED_PAGE_LISTENERS) {
+            if (!HOOKED_PAGE_LISTENERS.add(listenerType)) {
+                return;
+            }
+        }
+        try {
+            Method onPageSelected = listenerType.getMethod("onPageSelected", int.class);
+            if (Modifier.isAbstract(onPageSelected.getModifiers())
+                    || Modifier.isNative(onPageSelected.getModifiers())) {
+                return;
+            }
+            module.hook(onPageSelected)
+                    .setId("douyin-immersive-viewpager-selected-"
+                            + onPageSelected.toGenericString())
+                    .setExceptionMode(DouyinModule.ExceptionMode.PROTECTIVE)
+                    .intercept(chain -> {
+                        Object result = chain.proceed();
+                        ImmersiveUi.onFeedPageSelected();
+                        return result;
+                    });
+        } catch (NoSuchMethodException ignored) {
+            // Listener implementation without public onPageSelected(int).
+        } catch (Throwable error) {
+            module.log(Log.WARN, DouyinModule.TAG,
+                    "page listener hook failed: " + listenerType.getName(), error);
+        }
     }
 
     private static synchronized void configurePreferences(
@@ -200,6 +310,9 @@ final class FeedContentTracker {
         if (bestPanel != null) {
             lastPanel = new WeakReference<>(bestPanel);
         }
+        if (bestAweme == null) {
+            bestAweme = resolveAwemeFromVisiblePager(decor, centerX, centerY);
+        }
         return bestAweme == null ? null : snapshot(bestAweme, filterSettings);
     }
 
@@ -207,20 +320,162 @@ final class FeedContentTracker {
     static View currentPager(View decor) {
         Object panel = lastPanel.get();
         Field pagerField = viewPagerField;
-        if (panel == null || pagerField == null) {
+        if (panel != null && pagerField != null) {
+            try {
+                Object pager = pagerField.get(panel);
+                if (pager instanceof View view
+                        && view.isAttachedToWindow()
+                        && (decor == null || view.getRootView() == decor)) {
+                    return view;
+                }
+            } catch (ReflectiveOperationException | RuntimeException ignored) {
+                // Panels are recycled aggressively; fall back to visible VerticalViewPager.
+            }
+        }
+        if (decor == null) {
+            return null;
+        }
+        Rect decorVisible = new Rect();
+        if (!decor.getGlobalVisibleRect(decorVisible)) {
+            return null;
+        }
+        return findVisibleVerticalViewPager(
+                decor,
+                decor,
+                decorVisible.centerX(),
+                decorVisible.centerY()
+        );
+    }
+
+    /**
+     * Stable identity ("pagerHash#currentItem") of the currently visible feed page.
+     * Works directly off the live VerticalViewPager in the view tree even when no
+     * BaseListFragmentPanel instance or Aweme model is available.
+     */
+    static String currentPageIdentity(View decor) {
+        if (decor == null) {
+            return null;
+        }
+        Rect decorVisible = new Rect();
+        if (!decor.getGlobalVisibleRect(decorVisible)) {
+            return null;
+        }
+        View pager = findVisibleVerticalViewPager(
+                decor,
+                decor,
+                decorVisible.centerX(),
+                decorVisible.centerY()
+        );
+        if (pager == null) {
+            return null;
+        }
+        Object itemObj = invokeNoArg(pager.getClass(), pager, "getCurrentItem");
+        if (!(itemObj instanceof Number number)) {
+            return null;
+        }
+        return System.identityHashCode(pager) + "#" + number.intValue();
+    }
+
+    private static Object resolveAwemeFromVisiblePager(
+            View decor,
+            int centerX,
+            int centerY
+    ) {
+        View pager = findVisibleVerticalViewPager(decor, decor, centerX, centerY);
+        if (pager == null) {
+            return null;
+        }
+        Object itemObj = invokeNoArg(pager.getClass(), pager, "getCurrentItem");
+        Object adapter = invokeNoArg(pager.getClass(), pager, "getAdapter");
+        if (!(itemObj instanceof Number itemNumber) || adapter == null) {
+            return null;
+        }
+        int position = itemNumber.intValue();
+        if (position < 0) {
             return null;
         }
         try {
-            Object pager = pagerField.get(panel);
-            if (pager instanceof View view
-                    && view.isAttachedToWindow()
-                    && (decor == null || view.getRootView() == decor)) {
-                return view;
+            Method getItem = adapter.getClass().getMethod("getItem", int.class);
+            Object item = getItem.invoke(adapter, position);
+            if (isAwemeInstance(item)) {
+                return item;
             }
         } catch (ReflectiveOperationException | RuntimeException ignored) {
-            // Panels are recycled aggressively; the caller falls back to the decor view.
+            // Non-Aweme pager adapters (e.g. non-feed tabs) do not expose getItem(int)->Aweme.
         }
         return null;
+    }
+
+    private static boolean isAwemeInstance(Object item) {
+        if (item == null) {
+            return false;
+        }
+        for (Class<?> current = item.getClass(); current != null; current = current.getSuperclass()) {
+            if (current.getName().endsWith(".Aweme")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static View findVisibleVerticalViewPager(
+            View node,
+            View decor,
+            int centerX,
+            int centerY
+    ) {
+        if (node == null || !node.isAttachedToWindow()
+                || node.getVisibility() != View.VISIBLE
+                || node.getAlpha() <= 0.05f) {
+            return null;
+        }
+        View best = null;
+        long bestArea = 0L;
+        if (isVerticalViewPager(node.getClass()) && isEffectivelyVisible(node, decor)) {
+            Rect visible = new Rect();
+            if (node.getGlobalVisibleRect(visible) && visible.contains(centerX, centerY)) {
+                long area = (long) visible.width() * visible.height();
+                if (area >= (long) decor.getWidth() * decor.getHeight() / 5L) {
+                    best = node;
+                    bestArea = area;
+                }
+            }
+        }
+        if (node instanceof ViewGroup group) {
+            for (int i = 0; i < group.getChildCount(); i++) {
+                View childBest = findVisibleVerticalViewPager(
+                        group.getChildAt(i),
+                        decor,
+                        centerX,
+                        centerY
+                );
+                if (childBest != null) {
+                    long childArea = (long) childBest.getWidth() * childBest.getHeight();
+                    // Prefer the innermost matching VerticalViewPager (RTViewPager) when nested.
+                    if (best == null || childArea <= bestArea) {
+                        best = childBest;
+                        bestArea = childArea;
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    private static boolean isVerticalViewPager(Class<?> type) {
+        Boolean cached = VERTICAL_PAGER_TYPES.get(type);
+        if (cached != null) {
+            return cached;
+        }
+        boolean match = false;
+        for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+            if (VERTICAL_VIEW_PAGER_CLASS.equals(current.getName())) {
+                match = true;
+                break;
+            }
+        }
+        VERTICAL_PAGER_TYPES.put(type, match);
+        return match;
     }
 
     private static boolean isEffectivelyVisible(View view, View decor) {
@@ -255,7 +510,14 @@ final class FeedContentTracker {
             FilterPreferences.Values settings
     ) {
         Class<?> type = aweme.getClass();
-        String aid = stringValue(readField(type, aweme, "aid"));
+        Object rawAid = readField(type, aweme, "aid");
+        if (rawAid == null) {
+            rawAid = invokeNoArg(type, aweme, "getAid");
+        }
+        if (rawAid == null) {
+            rawAid = readSerializedField(aweme, "aweme_id");
+        }
+        String aid = stringValue(rawAid);
         int awemeType = intValue(readField(type, aweme, "awemeType"), -1);
         boolean ad = booleanValue(readField(type, aweme, "isAd"));
         Object rawAd = readField(type, aweme, "awemeRawAd");

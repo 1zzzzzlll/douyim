@@ -13,15 +13,18 @@ import java.util.WeakHashMap;
 final class PlayerHooks {
     private static final String[] ENGINE_CLASSES = {
             "com.ss.ttvideoengine.TTVideoEngine",
+            "com.ss.android.ugc.aweme.player.sdk.impl.MTTVideoEngine",
+            "com.ss.android.ugc.aweme.player.sdk.impl.util.MBaseTTVideoEngine",
             "com.ss.ttvideoengine.TTVideoEngineImpl",
             "com.ss.ttvideoengine.TTVideoEngineImplV2",
-            "com.ss.android.ugc.aweme.player.sdk.impl.SimplifyPlayerImpl",
-            "com.ss.android.ugc.playerkit.simapicommon.model.SimVideoUrlModel"
+            "com.ss.android.ugc.aweme.player.sdk.impl.SimplifyPlayerImpl"
     };
 
     private static final Set<Class<?>> HOOKED_LISTENER_CLASSES =
             Collections.newSetFromMap(new WeakHashMap<>());
     private static final Map<Object, WeakReference<Object>> LISTENER_OWNERS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<Class<?>, Boolean> ENGINE_LIKE_TYPES =
             Collections.synchronizedMap(new WeakHashMap<>());
 
     private PlayerHooks() {
@@ -58,12 +61,20 @@ final class PlayerHooks {
             } else if (lower.contains("completion") || lower.contains("completed")) {
                 hookEngineCompletion(module, method);
                 count++;
-            } else if (lower.startsWith("set") && lower.contains("listener")) {
+            } else if (isCallbackRegistrar(lower, method)) {
                 hookListenerSetter(module, method);
                 count++;
             }
         }
         return count;
+    }
+
+    private static boolean isCallbackRegistrar(String lower, Method method) {
+        // Douyin 41.x registers playback state callbacks via addVideoEngineCallback /
+        // setVideoEngineCallback / setVideoEngineSimpleCallback rather than setListener.
+        return method.getParameterCount() >= 1
+                && (lower.startsWith("set") || lower.startsWith("add"))
+                && (lower.contains("listener") || lower.contains("callback"));
     }
 
     private static boolean isPlayMethod(String name, Method method) {
@@ -143,6 +154,9 @@ final class PlayerHooks {
                 } else if (lower.equals("onplaybackstatechanged")) {
                     hookPlaybackStateCallback(module, method);
                     count++;
+                } else if (lower.equals("onrenderstart")) {
+                    hookRenderStartCallback(module, method);
+                    count++;
                 }
             } catch (Throwable error) {
                 module.log(Log.WARN, DouyinModule.TAG,
@@ -159,11 +173,23 @@ final class PlayerHooks {
                 .setExceptionMode(DouyinModule.ExceptionMode.PROTECTIVE)
                 .intercept(chain -> {
                     Object result = chain.proceed();
-                    WeakReference<Object> ownerReference =
-                            LISTENER_OWNERS.get(chain.getThisObject());
-                    Object owner = ownerReference == null ? null : ownerReference.get();
+                    Object owner = resolveCallbackOwner(chain.getArgs(), chain.getThisObject());
                     if (owner != null) {
                         PlaybackState.completed(owner);
+                    }
+                    return result;
+                });
+    }
+
+    private static void hookRenderStartCallback(DouyinModule module, Method method) {
+        module.hook(method)
+                .setId("douyin-player-callback-render-" + method.toGenericString())
+                .setExceptionMode(DouyinModule.ExceptionMode.PROTECTIVE)
+                .intercept(chain -> {
+                    Object result = chain.proceed();
+                    Object owner = resolveCallbackOwner(chain.getArgs(), chain.getThisObject());
+                    if (owner != null && PlaybackState.engineState(owner) == 1) {
+                        PlaybackState.playingFromCallback(owner);
                     }
                     return result;
                 });
@@ -177,12 +203,11 @@ final class PlayerHooks {
                     Object result = chain.proceed();
                     Integer state = lastInteger(chain.getArgs());
                     if (state != null && state >= 0 && state <= 4) {
-                        WeakReference<Object> ownerReference =
-                                LISTENER_OWNERS.get(chain.getThisObject());
-                        Object owner = ownerReference == null
-                                ? null
-                                : ownerReference.get();
-                        // TTVideoEngine 39.7.0: 0=stopped, 1=playing,
+                        Object owner = resolveCallbackOwner(
+                                chain.getArgs(),
+                                chain.getThisObject()
+                        );
+                        // TTVideoEngine: 0=stopped, 1=playing,
                         // 2=paused, 3=error, 4=initializing.
                         if (owner != null && state == 1) {
                             PlaybackState.playingFromCallback(owner);
@@ -194,6 +219,47 @@ final class PlayerHooks {
                     }
                     return result;
                 });
+    }
+
+    /**
+     * VideoEngineCallback / VideoEngineListener pass the TTVideoEngine itself as the first
+     * argument. Preferring that argument avoids owner mixups when Douyin shares a single
+     * callback instance across multiple pooled / preloaded engines.
+     */
+    static Object resolveCallbackOwner(
+            java.util.List<Object> args,
+            Object listenerInstance
+    ) {
+        if (args != null) {
+            for (Object arg : args) {
+                if (arg != null && isEngineLike(arg.getClass())) {
+                    return arg;
+                }
+            }
+        }
+        WeakReference<Object> ownerReference = LISTENER_OWNERS.get(listenerInstance);
+        return ownerReference == null ? null : ownerReference.get();
+    }
+
+    private static boolean isEngineLike(Class<?> type) {
+        Boolean cached = ENGINE_LIKE_TYPES.get(type);
+        if (cached != null) {
+            return cached;
+        }
+        boolean match = false;
+        try {
+            type.getMethod("getPlaybackState");
+            match = true;
+        } catch (NoSuchMethodException ignored) {
+            for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+                if ("com.ss.ttvideoengine.TTVideoEngine".equals(current.getName())) {
+                    match = true;
+                    break;
+                }
+            }
+        }
+        ENGINE_LIKE_TYPES.put(type, match);
+        return match;
     }
 
     private static Integer lastInteger(java.util.List<Object> values) {

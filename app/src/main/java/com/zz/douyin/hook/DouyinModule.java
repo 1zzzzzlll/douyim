@@ -18,10 +18,12 @@ public final class DouyinModule extends XposedModule {
     static final String TARGET_PACKAGE = "com.ss.android.ugc.aweme";
     private static final Set<ClassLoader> INSTALLED_LOADERS =
             Collections.newSetFromMap(new WeakHashMap<>());
+    private volatile String loadedProcessName;
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
-        log(Log.INFO, TAG, "module 1.7.7 loaded in " + param.getProcessName()
+        loadedProcessName = param.getProcessName();
+        log(Log.INFO, TAG, "module 1.7.8 loaded in " + loadedProcessName
                 + ", framework=" + getFrameworkName()
                 + ", api=" + getApiVersion());
     }
@@ -29,6 +31,11 @@ public final class DouyinModule extends XposedModule {
     @Override
     public void onPackageReady(PackageReadyParam param) {
         if (!TARGET_PACKAGE.equals(param.getPackageName()) || !param.isFirstPackage()) {
+            return;
+        }
+        String process = loadedProcessName;
+        if (process != null && !process.isEmpty() && !TARGET_PACKAGE.equals(process)) {
+            log(Log.DEBUG, TAG, "skipping non-main process " + process);
             return;
         }
         synchronized (INSTALLED_LOADERS) {

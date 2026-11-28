@@ -21,6 +21,10 @@ final class PlaybackState {
     private static volatile WeakReference<Object> userPausedEngine =
             new WeakReference<>(null);
     private static volatile String userPausedAid;
+    private static volatile String userPausedPageIdentity;
+    private static volatile WeakReference<Object> activeWatchdogEngine =
+            new WeakReference<>(null);
+    private static volatile long activeWatchdogBaselinePos = -1L;
     private static volatile long expectedVideoSwitchUntil;
     private static volatile long autoSwitchUntil;
     private static volatile WeakReference<Object> engine = new WeakReference<>(null);
@@ -110,12 +114,7 @@ final class PlaybackState {
             }
         }
         if (clearUserPause && userPaused) {
-            userPaused = false;
-            userPausedAt = 0L;
-            userPausedEngine.clear();
-            userPausedAid = null;
-            clearPendingSwitchPlayer();
-            expectedVideoSwitchUntil = 0L;
+            clearUserPauseState();
             Log.i(DouyinModule.TAG,
                     sameEngineResumed
                             ? "cleared user pause after confirmed resume"
@@ -248,7 +247,8 @@ final class PlaybackState {
             Object expectedEngine,
             long uptimeMillis,
             int initialState,
-            String aid
+            String aid,
+            String pageIdentity
     ) {
         if (expectedEngine == null) {
             return false;
@@ -268,13 +268,17 @@ final class PlaybackState {
         userPausedAt = SystemClock.uptimeMillis();
         userPausedEngine = new WeakReference<>(expectedEngine);
         userPausedAid = knownAid(aid) ? aid : null;
+        userPausedPageIdentity = pageIdentity;
+        activeWatchdogEngine.clear();
+        activeWatchdogBaselinePos = -1L;
         clearPendingSwitchPlayer();
         expectedVideoSwitchUntil = 0L;
         autoSwitchUntil = 0L;
         playing = false;
         pausedAt = 0L;
         generation++;
-        Log.i(DouyinModule.TAG, "playback=user-paused");
+        Log.i(DouyinModule.TAG, "playback=user-paused page=" + pageIdentity
+                + " aid=" + userPausedAid);
         return true;
     }
 
@@ -286,33 +290,86 @@ final class PlaybackState {
                 if (pauseAge < 1_500L) {
                     return false;
                 }
-                userPaused = false;
-                userPausedAt = 0L;
-                userPausedEngine.clear();
-                userPausedAid = null;
-                clearPendingSwitchPlayer();
+                clearUserPauseState();
                 playing = true;
                 pausedAt = 0L;
                 Log.w(DouyinModule.TAG,
                         "cleared unbacked stale user pause");
-            } else if (pauseAge < 600L || playbackState(pausedPlayer) != 1) {
+            } else if (pauseAge < 600L) {
                 return false;
-            } else {
-                userPaused = false;
-                userPausedAt = 0L;
-                userPausedEngine.clear();
-                userPausedAid = null;
-                clearPendingSwitchPlayer();
+            } else if (playbackState(pausedPlayer) == 1) {
+                clearUserPauseState();
                 playing = true;
                 pausedAt = 0L;
                 Log.i(DouyinModule.TAG,
                         "cleared stale user pause because the same video is playing");
+            } else if (!photoContent && pauseAge >= 800L
+                    && hasActivelyAdvancingOtherEngine(pausedPlayer)) {
+                clearUserPauseState();
+                playing = true;
+                pausedAt = 0L;
+                Log.i(DouyinModule.TAG,
+                        "cleared stale user pause because another engine is actively playing");
+            } else {
+                return false;
             }
         }
         // Host engines emit pause/stop/release callbacks for preloaded and recycled
         // players. Only an explicitly confirmed user pause may expose the host UI;
         // otherwise the visible current renderer remains in immersive mode.
         return true;
+    }
+
+    /**
+     * Self-healing guard: if userPaused points to an old pooled engine while another
+     * engine is in state=1 AND genuinely advancing playback time (unlike a prepare_only
+     * background engine whose clock stays at 0), clear the stale pause automatically.
+     */
+    private static boolean hasActivelyAdvancingOtherEngine(Object pausedPlayer) {
+        Object candidate = resolveActiveEngine();
+        if (candidate == null || candidate == pausedPlayer || playbackState(candidate) != 1) {
+            activeWatchdogEngine.clear();
+            activeWatchdogBaselinePos = -1L;
+            return false;
+        }
+        try {
+            long pos = invokeLong(candidate, "getCurrentPlaybackTime");
+            if (pos < 0L) {
+                return false;
+            }
+            if (activeWatchdogEngine.get() != candidate || activeWatchdogBaselinePos < 0L
+                    || pos < activeWatchdogBaselinePos) {
+                activeWatchdogEngine = new WeakReference<>(candidate);
+                activeWatchdogBaselinePos = pos;
+                return false;
+            }
+            if (isActivelyAdvancingPosition(activeWatchdogBaselinePos, pos)) {
+                engine = new WeakReference<>(candidate);
+                resetProgressTracking(candidate);
+                activeWatchdogEngine.clear();
+                activeWatchdogBaselinePos = -1L;
+                return true;
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // Engine without timing query falls back to page/aid/callback signals.
+        }
+        return false;
+    }
+
+    static boolean isActivelyAdvancingPosition(long baselinePos, long currentPos) {
+        return baselinePos >= 0L && currentPos - baselinePos >= 180L;
+    }
+
+    private static void clearUserPauseState() {
+        userPaused = false;
+        userPausedAt = 0L;
+        userPausedEngine.clear();
+        userPausedAid = null;
+        userPausedPageIdentity = null;
+        activeWatchdogEngine.clear();
+        activeWatchdogBaselinePos = -1L;
+        clearPendingSwitchPlayer();
+        expectedVideoSwitchUntil = 0L;
     }
 
     static synchronized boolean consumeLoopBoundary() {
@@ -497,23 +554,13 @@ final class PlaybackState {
     }
 
     static synchronized void userPlaying() {
-        userPaused = false;
-        userPausedAt = 0L;
-        userPausedEngine.clear();
-        userPausedAid = null;
-        clearPendingSwitchPlayer();
-        expectedVideoSwitchUntil = 0L;
+        clearUserPauseState();
         markPlaying(null, false, true);
         Log.i(DouyinModule.TAG, "playback=user-resumed");
     }
 
     static synchronized void clearModuleIntents() {
-        userPaused = false;
-        userPausedAt = 0L;
-        userPausedEngine.clear();
-        userPausedAid = null;
-        clearPendingSwitchPlayer();
-        expectedVideoSwitchUntil = 0L;
+        clearUserPauseState();
         consumePlaybackError();
         consumeLoopBoundary();
     }
@@ -524,17 +571,34 @@ final class PlaybackState {
                 || !isDifferentKnownContent(pausedAid, visibleAid)) {
             return false;
         }
-        userPaused = false;
-        userPausedAt = 0L;
-        userPausedEngine.clear();
-        userPausedAid = null;
-        clearPendingSwitchPlayer();
-        expectedVideoSwitchUntil = 0L;
+        clearUserPauseState();
         markPlaying(null, false, true);
         Log.i(DouyinModule.TAG,
                 "cleared user pause after feed item changed: "
                         + pausedAid + " -> " + visibleAid);
         return true;
+    }
+
+    static synchronized boolean clearUserPauseForPageChange(String visiblePageIdentity) {
+        String pausedPage = userPausedPageIdentity;
+        if (!userPaused
+                || !isDifferentKnownPage(pausedPage, visiblePageIdentity)) {
+            return false;
+        }
+        clearUserPauseState();
+        markPlaying(null, false, true);
+        Log.i(DouyinModule.TAG,
+                "cleared user pause after feed page changed: "
+                        + pausedPage + " -> " + visiblePageIdentity);
+        return true;
+    }
+
+    static boolean isDifferentKnownPage(String previousPage, String currentPage) {
+        return previousPage != null
+                && !previousPage.isEmpty()
+                && currentPage != null
+                && !currentPage.isEmpty()
+                && !previousPage.equals(currentPage);
     }
 
     static boolean isDifferentKnownContent(String previousAid, String currentAid) {

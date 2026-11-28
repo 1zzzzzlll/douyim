@@ -39,18 +39,18 @@
 | Android | 9（API 28）及以上 |
 | 默认作用域 | `com.ss.android.ugc.aweme` |
 | 模块包名 | `com.zz.douyin` |
-| 本次适配设备 | 抖音 41.0.0（versionCode 410001）／Android 17 |
-| 模块版本 | 1.7.7 |
+| 本次适配设备 | 抖音 41.3.0（versionCode 410301）／Android 17 |
+| 模块版本 | 1.7.8 |
 
 模块基于抖音 39.7.0 的运行时结构适配，并针对 40.5.0 补充双击拦截、40.8.0 补充弹幕分层、
 广告标记与图文渲染适配、40.9.0 补充图文图片下载、41.0.0 适配固定清晰度（模型类直挂 +
-预加载层钉死）。抖音升级后，播放器类、数据模型或界面层级
+预加载层钉死）、41.3.0 修复播放回调与信息流追踪失效导致的沉浸状态丢失。抖音升级后，播放器类、数据模型或界面层级
 可能变化，届时需要重新适配。
 
 ## 安装
 
 1. 从 [`dist`](dist) 目录下载最新版
-   [`douxianren-lsp-api102-v1.7.7.apk`](dist/douxianren-lsp-api102-v1.7.7.apk)。
+   [`douxianren-lsp-api102-v1.7.8.apk`](dist/douxianren-lsp-api102-v1.7.8.apk)。
 2. 在手机上安装 APK。
 3. 在 LSPosed 中启用“抖仙人”模块。
 4. 保持默认作用域“抖音”，然后强制停止并重新打开抖音。
@@ -61,7 +61,7 @@ LSPosed 中重新启用新包名模块并确认作用域。
 最新版 APK 的 SHA-256：
 
 ```text
-bed3348894c3b69bb5a46220a96bf04141d93b67fe6d73d8bd61cffe5f871337
+9067db004f4f417b3eba7df6019adeb5fb1854835267ebfe7e438cfb96926001
 ```
 
 ## 使用方式
@@ -99,8 +99,19 @@ bed3348894c3b69bb5a46220a96bf04141d93b67fe6d73d8bd61cffe5f871337
 
 ## 实现说明
 
-- 播放状态通过 `TTVideoEngine`、`TTVideoEngineImplV2` 及其
-  `VideoEngineListener` 回调进行跟踪。
+- 播放状态通过 `TTVideoEngine`、`MTTVideoEngine` 及其
+  `VideoEngineCallback` / `VideoEngineListener` 回调进行跟踪。
+- 1.7.8 修复抖音 41.3.0 刷视频中途突然失去沉浸式播放的问题：
+  ① 补齐 `MTTVideoEngine` 及 `addVideoEngineCallback`／`setVideoEngineCallback`／`onRenderStart`
+  播放回调挂钩，并直接从回调首参读取当前引擎实例，解决预准备引擎复用时不触发 `play()` 导致
+  播放状态与暂停解除信号丢失的问题；
+  ② 修复 Android 17 云端 Profile（`base.dm`）AOT 内联 `BaseListFragmentPanel` 构造函数后面板表
+  为空、且 `y0(int)` 翻页钩子改名导致的内容识别与翻页重置失效，新增运行时方法登记、
+  `VerticalViewPager.OnPageChangeListener` 挂钩及可见 `VerticalViewPager` 直读 `Aweme` 兜底；
+  ③ 为用户暂停补充窗口焦点校验、可见页号（`pager#item`）同步与异引擎时钟推进自愈，避免跳转页面或
+  暂停后直接上滑把旧引擎的暂停状态带入后续视频；
+  ④ 放宽真实视频渲染层的居中判定，兼容上移排版的 16:9 横屏视频与 21:9 电影宽屏比例，避免切入后
+  3 秒退回原生界面。
 - 清晰度锁定分两层实现。引擎层：`TTVideoEngine.setVideoModel` 等模型入口把
   `VideoModel` 交给引擎后，模块把 `getVideoInfoList`、`getSupportResolutions` 及所有返回
   `VideoInfo` 的查询（含混淆名方法）统一钉到目标清晰度对应的档位，并尽量保持引擎原本
